@@ -2689,8 +2689,12 @@ app.post('/api/extract-business', async (req, res) => {
       if (!business.address.city && py.city) business.address.city = py.city;
       if (!business.address.state && py.state) business.address.state = py.state;
       if (!business.address.zip && py.zip_code) business.address.zip = py.zip_code;
-      const pythonNameIsAuthoritative = pythonExtraction.best_name_source === 'primary' && py.confidence_score >= 80;
-      if (pythonNameIsAuthoritative && py.business_name) {
+      const pythonNameIsAuthoritative =
+        !!py.business_name &&
+        py.confidence_score >= 85 &&
+        !isBoilerplateName(py.business_name) &&
+        !looksLikeWeakName(py.business_name);
+      if (pythonNameIsAuthoritative) {
         business.businessName = py.business_name;
       }
       console.log(`  [PY-EXTRACT] ok=${pythonExtraction.ok} fallback=${pythonExtraction.used_fallback ? 'yes' : 'no'} score=${py.confidence_score || 0} name_source=${pythonExtraction.best_name_source || 'none'}`);
