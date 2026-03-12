@@ -31,6 +31,25 @@ _PRIMARY_ADDRESS_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_BUSINESS_TYPE_HINTS = (
+    "localbusiness",
+    "organization",
+    "corporation",
+    "professionalservice",
+    "attorney",
+    "dentist",
+    "medicalbusiness",
+    "store",
+    "restaurant",
+    "financialservice",
+    "realestateagent",
+)
+
+_NAME_BLOCKLIST_RE = re.compile(
+    r"^(home|welcome|contact|about|services?|privacy policy|terms|untitled|default|my site|my wordpress blog)$",
+    re.IGNORECASE,
+)
+
 
 def _clean_text(text: str) -> str:
     text = unescape(text or "")
@@ -73,8 +92,23 @@ def _iter_schema_nodes(obj: Any) -> Iterable[Dict[str, Any]]:
 def _is_local_business(node: Dict[str, Any]) -> bool:
     schema_type = node.get("@type", "")
     if isinstance(schema_type, list):
-        return any("localbusiness" in str(value).lower() for value in schema_type)
-    return "localbusiness" in str(schema_type).lower()
+        joined = " ".join(str(value).lower() for value in schema_type)
+    else:
+        joined = str(schema_type).lower()
+    return any(hint in joined for hint in _BUSINESS_TYPE_HINTS)
+
+
+def _is_valid_business_name(name: str) -> bool:
+    cleaned = _clean_text(name)
+    if not cleaned:
+        return False
+    if len(cleaned) < 3 or len(cleaned) > 90:
+        return False
+    if _NAME_BLOCKLIST_RE.search(cleaned):
+        return False
+    if re.search(r"\.(?:com|net|org|info|biz|edu)$", cleaned, flags=re.IGNORECASE):
+        return False
+    return True
 
 
 def parse_schema_business_data(html: str) -> Dict[str, Any]:
@@ -91,7 +125,7 @@ def parse_schema_business_data(html: str) -> Dict[str, Any]:
             if not _is_local_business(node):
                 continue
 
-            name = _clean_text(str(node.get("name", "")))
+            name = _clean_text(str(node.get("name", "") or node.get("legalName", "")))
             address = node.get("address", {})
 
             street = city = state = zip_code = ""
@@ -116,6 +150,9 @@ def parse_schema_business_data(html: str) -> Dict[str, Any]:
                 "confidence_score": 95,
             }
 
+            if not _is_valid_business_name(candidate["business_name"]):
+                candidate["business_name"] = ""
+
             completeness = sum(bool(candidate[k]) for k in ("business_name", "street_address", "city", "state", "zip_code"))
             best_completeness = sum(bool(best[k]) for k in ("business_name", "street_address", "city", "state", "zip_code"))
             if completeness > best_completeness:
@@ -129,19 +166,37 @@ def extract_business_name(html: str) -> Dict[str, Any]:
     html = html or ""
 
     schema_data = parse_schema_business_data(html)
-    if schema_data.get("business_name"):
+    if schema_data.get("business_name") and _is_valid_business_name(schema_data["business_name"]):
         return {
             "business_name": schema_data["business_name"],
             "confidence_score": 95,
             "source": "schema_localbusiness",
         }
 
+    # Hardcoded meta name priority list for consistency across themes/CMS templates.
+    for meta_re, source, score in (
+        (r"<meta[^>]+property=['\"]og:site_name['\"][^>]+content=['\"](.*?)['\"]", "og:site_name", 85),
+        (r"<meta[^>]+name=['\"]application-name['\"][^>]+content=['\"](.*?)['\"]", "application-name", 82),
+        (r"<meta[^>]+name=['\"]apple-mobile-web-app-title['\"][^>]+content=['\"](.*?)['\"]", "apple-app-title", 80),
+        (r"<meta[^>]+property=['\"]og:title['\"][^>]+content=['\"](.*?)['\"]", "og:title", 78),
+    ):
+        m = re.search(meta_re, html, flags=re.IGNORECASE | re.DOTALL)
+        if not m:
+            continue
+        candidate = _clean_text(re.split(r"[|\-–:]", m.group(1))[0])
+        if _is_valid_business_name(candidate):
+            return {
+                "business_name": candidate,
+                "confidence_score": score,
+                "source": source,
+            }
+
     og_match = re.search(
         r"<meta[^>]+property=['\"]og:site_name['\"][^>]+content=['\"](.*?)['\"]",
         html,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    if og_match:
+    if og_match and _is_valid_business_name(og_match.group(1)):
         return {
             "business_name": _clean_text(og_match.group(1)),
             "confidence_score": 85,
@@ -151,7 +206,7 @@ def extract_business_name(html: str) -> Dict[str, Any]:
     title_match = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
     if title_match:
         title = _clean_text(re.split(r"[|\-–:]", title_match.group(1))[0])
-        if title:
+        if _is_valid_business_name(title):
             return {
                 "business_name": title,
                 "confidence_score": 70,
@@ -159,7 +214,7 @@ def extract_business_name(html: str) -> Dict[str, Any]:
             }
 
     h1_match = re.search(r"<h1[^>]*>(.*?)</h1>", html, flags=re.IGNORECASE | re.DOTALL)
-    if h1_match:
+    if h1_match and _is_valid_business_name(h1_match.group(1)):
         return {
             "business_name": _clean_text(h1_match.group(1)),
             "confidence_score": 70,
@@ -174,7 +229,7 @@ def extract_business_name(html: str) -> Dict[str, Any]:
             footer_text,
             flags=re.IGNORECASE,
         )
-        if copyright_match:
+        if copyright_match and _is_valid_business_name(copyright_match.group(1)):
             return {
                 "business_name": _clean_text(copyright_match.group(1)),
                 "confidence_score": 85,
