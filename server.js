@@ -7,6 +7,7 @@ import { URL } from 'url';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
+import * as cheerio from 'cheerio';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -760,8 +761,18 @@ app.post('/api/analyze', async (req, res) => {
     else { overallStatus = 'ISSUES'; statusColor = 'yellow'; }
 
     const genuinelyValid = ['ACTIVE','POLITICAL_CAMPAIGN'].includes(overallStatus);
-    console.log(`  -> ${overallStatus} | Words:${contentAnalysis.details.wordCount} Unique:${contentAnalysis.details.uniqueWordCount} | Valid:${genuinelyValid}`);
-    const result = { domain, timestamp, overallStatus, statusColor, isGenuinelyValid:genuinelyValid, dns:dnsResults, ssl:sslResults, http:httpStatus, content:contentAnalysis };
+
+    // Domain age lookup (non-blocking — don't fail the whole analysis if it errors)
+    let domainAge = null;
+    try {
+      const ageResult = await getDomainAge(domain);
+      if (ageResult.createdDate) {
+        domainAge = { ageText: ageResult.ageText, createdDate: ageResult.createdDate, ageInDays: ageResult.ageInDays, registrar: ageResult.registrar };
+      }
+    } catch (e) { /* domain age is best-effort */ }
+
+    console.log(`  -> ${overallStatus} | Words:${contentAnalysis.details.wordCount} Unique:${contentAnalysis.details.uniqueWordCount} | Valid:${genuinelyValid} | Age:${domainAge?.ageText || 'N/A'}`);
+    const result = { domain, timestamp, overallStatus, statusColor, isGenuinelyValid:genuinelyValid, dns:dnsResults, ssl:sslResults, http:httpStatus, content:contentAnalysis, domainAge };
     res.json(result);
   } catch (err) {
     console.error(`  -> ERROR: ${err.message}`);
@@ -2134,6 +2145,74 @@ function buildBusinessStrengthSignals({ businessName, phones, emails, address, s
   };
 }
 
+// === CHEERIO-BASED BUSINESS NAME EXTRACTION ===
+// Uses cheerio for reliable DOM parsing with priority:
+//   1. Schema.org JSON-LD (legalName/name)
+//   2. og:site_name
+//   3. itemprop="name"
+//   4. Cleaned <title> tag
+function extractBusinessNameCheerio(html) {
+  const $ = cheerio.load(html || '');
+  const boilerplateEdge = /^(Home|Welcome|Welcome to|Index)\b\s*[-–—:|]?\s*|\s*[-–—:|]?\s*\b(Home|Welcome|Index)$/gi;
+  const cleanBizName = (s) => {
+    if (!s) return s;
+    let n = s.replace(/\s+/g, ' ').trim();
+    n = n.replace(boilerplateEdge, '').trim();
+    n = n.replace(/^\s*[-–—:|]+\s*|\s*[-–—:|]+\s*$/g, '').trim();
+    return n;
+  };
+
+  // Priority 1: og:site_name (usually the cleanest brand name)
+  let bizName = $('meta[property="og:site_name"]').attr('content');
+  if (bizName) {
+    bizName = cleanBizName(bizName);
+    if (bizName && bizName.length > 2 && bizName.length < 80 && !isBoilerplateName(bizName)) {
+      return { name: bizName, source: 'og:site_name', confidence: 88 };
+    }
+  }
+
+  // Priority 2: JSON-LD Schema.org LocalBusiness
+  $('script[type="application/ld+json"]').each(function () {
+    if (bizName) return;
+    try {
+      const data = JSON.parse($(this).html() || '{}');
+      const items = Array.isArray(data) ? data : data['@graph'] ? data['@graph'] : [data];
+      for (const item of items) {
+        const typeStr = Array.isArray(item['@type']) ? item['@type'].join(' ') : String(item['@type'] || '');
+        if (/localbusiness|organization|corporation/i.test(typeStr)) {
+          const name = cleanBizName(item.legalName || item.name || '');
+          if (name && name.length > 2 && name.length < 80 && !isBoilerplateName(name)) {
+            bizName = name;
+            return false; // break .each
+          }
+        }
+      }
+    } catch {}
+  });
+  if (bizName) return { name: bizName, source: 'schema_jsonld', confidence: 95 };
+
+  // Priority 3: itemprop="name"
+  const itempropEl = $('[itemprop="name"]').first();
+  if (itempropEl.length) {
+    const name = cleanBizName(itempropEl.text() || itempropEl.attr('content') || '');
+    if (name && name.length > 2 && name.length < 80 && !isBoilerplateName(name)) {
+      return { name, source: 'itemprop_name', confidence: 85 };
+    }
+  }
+
+  // Priority 4: Title tag (cleaned)
+  const titleText = $('title').text();
+  if (titleText) {
+    let name = titleText.split('|')[0].split('-')[0].split('–')[0].split('—')[0].trim();
+    name = cleanBizName(name);
+    if (name && name.length > 2 && name.length < 80 && !isBoilerplateName(name)) {
+      return { name, source: 'title', confidence: 70 };
+    }
+  }
+
+  return null;
+}
+
 async function extractBusinessInfo(html, domain) {
    const bodyText = html
      .replace(/<script[\s\S]*?<\/script>/gi, '')
@@ -2154,6 +2233,9 @@ async function extractBusinessInfo(html, domain) {
 
    // 1d. Enhanced business name sources (logo alt, aria-label, meta, itemprop, copyright)
    const enhancedNames = extractEnhancedBusinessName(html);
+
+   // 1e. Cheerio-based name extraction (clean DOM parsing with priority)
+   const cheerioName = extractBusinessNameCheerio(html);
 
    // 2. Open Graph meta tags
    const og = extractOGMeta(html);
@@ -2210,6 +2292,11 @@ async function extractBusinessInfo(html, domain) {
 
    // 6. Business name (cleaned) — now includes footer as a source
    let businessName = cleanBusinessName(rawTitle, cleanOGSiteName, cleanSchemaName, domain, footerName);
+
+   // 6b. If cheerio-based extraction found a high-confidence name, prefer it
+   if (cheerioName && cheerioName.confidence >= 85 && cheerioName.name && !isBoilerplateName(cheerioName.name)) {
+     businessName = normalizeExtractedBusinessName(cheerioName.name);
+   }
 
   // Helper: count how many domain keywords appear in a string
   const domRaw = domain.replace(/\.(com|net|org|info|biz|co|us|io|store|art|inc|godaddysites\.com)$/i, '');
@@ -2745,6 +2832,25 @@ app.post('/api/extract-business', async (req, res) => {
     console.error(`  -> BIZ ERROR: ${err.message}\n${err.stack}`);
     // Return a degraded 200 response instead of 500 so the frontend can display partial info
     res.json({ domain, websiteStatus: 'ERROR', reasons: [err.message || 'Extraction failed'], business: { businessName: '', phones: [], emails: [], address: { street:'', city:'', state:'', zip:'' }, country: { code:'UNKNOWN', name:'Unknown', confidence:'none' }, metaDescription: null, businessType: null, socialSignals: [], strength: { score: 0, confidence: 'low', signals: { hasBusinessName:false, hasPhone:false, hasEmail:false, hasStreetAddress:false, hasLocality:false, hasSchemaName:false, hasMetaDescription:false, hasSocialPresence:false, socialCount:0 } } } });
+  }
+});
+
+// === DOMAIN AGE ENDPOINT ===
+app.get('/api/domain-age', async (req, res) => {
+  const domain = normalizeDomain(req.query.domain || '');
+  if (!domain) return res.status(400).json({ error: 'domain query parameter is required' });
+  try {
+    const result = await getDomainAge(domain);
+    res.json({
+      domain,
+      ageText: result.ageText || null,
+      createdDate: result.createdDate || null,
+      ageInDays: result.ageInDays || null,
+      registrar: result.registrar || null,
+      error: result.error || null,
+    });
+  } catch (e) {
+    res.json({ domain, ageText: null, createdDate: null, error: e.message });
   }
 });
 

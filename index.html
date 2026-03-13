@@ -254,6 +254,7 @@ function renderSingle(d){
   const ssl=d.ssl||{};h+='<div class="card"><div class="ch"><div class="ci green">🔒</div><div class="ct">SSL</div></div>'+rows([['Valid',ssl.valid?'Yes':'No',ssl.valid?'green':'red'],['Issuer',ssl.issuer],['Days Left',ssl.daysRemaining!=null?ssl.daysRemaining+'d':'N/A',ssl.daysRemaining>30?'green':'red'],['Protocol',ssl.protocol]])+'</div>';
   const dns=d.dns||{};h+='<div class="card"><div class="ch"><div class="ci purple">🌐</div><div class="ct">DNS</div></div>'+rows([['A',dns.aRecords?.length>0?dns.aRecords.join(', '):'None',dns.hasARecord?'green':'red'],['MX',dns.mxRecords?.length>0?dns.mxRecords.map(m=>m.exchange).join(', '):'None'],['NS',dns.nsRecords?.length>0?dns.nsRecords.slice(0,3).join(', '):'None']])+'</div>';
   h+='<div class="card"><div class="ch"><div class="ci cyan">🖥</div><div class="ct">Server</div></div>'+rows([['Server',d.http?.headers?.server||'—'],['Powered By',d.http?.headers?.poweredBy||'—'],['Type',d.http?.headers?.contentType||'—']])+'</div>';
+  const age=d.domainAge||{};h+='<div class="card"><div class="ch"><div class="ci orange">📅</div><div class="ct">Domain Age</div></div>'+rows([['Age',age.ageText||'N/A'],['Created',age.createdDate||'N/A'],['Registrar',age.registrar||'N/A']])+'</div>';
   const ct=d.content||{};const vc=vC(ct.verdict);
   h+='<div class="card card-full"><div class="ch"><div class="ci orange">📊</div><div class="ct">Content Intelligence</div></div>';
   h+='<div class="cv '+vc+'"><span style="font-size:1.1rem">'+vE(ct.verdict)+'</span><span>'+fmtV(ct.verdict)+'</span><span class="cv-c">'+(ct.confidence||0)+'%</span></div>';
@@ -457,5 +458,3 @@ function exportCombinedCSV(){
 </script>
 </body>
 </html>
-server.js
-server.js
