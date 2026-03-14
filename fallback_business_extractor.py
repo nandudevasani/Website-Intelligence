@@ -172,6 +172,41 @@ def _result(confidence, business_name="", street_address="", city="", state="", 
     return out
 
 
+def _method_og_site_name(soup):
+    """Extract business name from og:site_name meta tag — confidence 88."""
+    tag = soup.find("meta", attrs={"property": "og:site_name"})
+    if tag:
+        name = _clean_business_name(tag.get("content", ""))
+        if name and len(name) > 1:
+            return _result(88, business_name=name)
+    return _result(0)
+
+
+def _method_itemprop_name(soup):
+    """Extract business name from itemprop='name' — confidence 85."""
+    tag = soup.find(attrs={"itemprop": "name"})
+    if tag:
+        name = _clean_business_name(tag.get_text(" ", strip=True))
+        if name and len(name) > 1:
+            return _result(85, business_name=name)
+    return _result(0)
+
+
+def _method_meta_names(soup):
+    """Extract business name from application-name or og:title — confidence 80."""
+    for attr, val, conf in [
+        ("name", "application-name", 82),
+        ("name", "apple-mobile-web-app-title", 80),
+        ("property", "og:title", 78),
+    ]:
+        tag = soup.find("meta", attrs={attr: val})
+        if tag:
+            name = _clean_business_name(tag.get("content", ""))
+            if name and len(name) > 1:
+                return _result(conf, business_name=name)
+    return _result(0)
+
+
 def _method_title_name(soup):
     title = soup.title.get_text(" ", strip=True) if soup.title else ""
     if not title:
@@ -179,7 +214,7 @@ def _method_title_name(soup):
     title = re.sub(r"\b(Home|Welcome|Official Website)\b", "", title, flags=re.IGNORECASE)
     title = re.split(r"\s*[|\-–:]\s*", title)[0]
     title = _clean_business_name(title)
-    return _result(60, business_name=title) if title else _result(0)
+    return _result(70, business_name=title) if title else _result(0)
 
 
 def _method_footer_scan(soup):
@@ -332,6 +367,9 @@ def extract_fallback_business_data(html_content, page_url=""):
 
     candidates = [
         schema_result,
+        _method_og_site_name(soup),
+        _method_itemprop_name(soup),
+        _method_meta_names(soup),
         _method_footer_scan(soup),
         _method_regex_page_text(visible_text),
         _method_google_maps_embed(soup),
