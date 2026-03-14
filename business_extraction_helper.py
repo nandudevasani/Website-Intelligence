@@ -62,8 +62,15 @@ _STREET_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _CITY_STATE_ZIP_PATTERN = re.compile(
-    r"\b([A-Za-z\s]+),?\s([A-Za-z]{2})\s(\d{5})(?:-\d{4})?\b"
+    r"(?:,\s*|\b)([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){0,3}),?\s+([A-Za-z]{2})\s+(\d{5})(?:-\d{4})?"
 )
+
+_STREET_SUFFIXES = frozenset([
+    "street", "st", "road", "rd", "avenue", "ave", "boulevard", "blvd",
+    "lane", "ln", "drive", "dr", "court", "ct", "way", "place", "pl",
+    "circle", "cir", "trail", "trl", "parkway", "pkwy", "highway", "hwy",
+    "terrace", "ter", "pike",
+])
 
 
 def _clean_text(text: str) -> str:
@@ -226,6 +233,12 @@ def _detect_city_state_zip_regex(text: str) -> Dict[str, str]:
     city = _clean_text(match.group(1))
     state = match.group(2).upper()
     zip_code = match.group(3)
+    # Strip leading street suffix words that bled into the city
+    # e.g., "Lane Cape Coral" -> "Cape Coral"
+    city_words = city.split()
+    while city_words and city_words[0].lower() in _STREET_SUFFIXES:
+        city_words.pop(0)
+    city = " ".join(city_words)
     return {"city": city, "state": state, "zip_code": zip_code}
 
 

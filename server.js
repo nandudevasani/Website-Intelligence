@@ -89,7 +89,7 @@ function isBoilerplateName(s) {
     /coming\s+soon/i.test(t) ||
     /under\s+construction/i.test(t) ||
     /\b(for sale|park model|for sale by owner|fsbo|listing)\b/i.test(t) ||
-    /^(home|index|untitled|default|new page|page \d+)$/i.test(t) ||
+    /^(home|index|untitled|default|new|new page|page \d+)$/i.test(t) ||
     /^(hello world|sample page|test page)$/i.test(t)
   );
 }
@@ -762,21 +762,23 @@ app.post('/api/analyze', async (req, res) => {
 
     const genuinelyValid = ['ACTIVE','POLITICAL_CAMPAIGN'].includes(overallStatus);
 
-    // Domain age lookup (non-blocking — don't fail the whole analysis if it errors)
+    // Domain age lookup — race against a 10s timeout so it never blocks the response
     let domainAge = null;
     try {
-      const ageResult = await getDomainAge(domain);
-      if (ageResult.createdDate) {
+      const agePromise = getDomainAge(domain);
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('age-timeout')), 10000));
+      const ageResult = await Promise.race([agePromise, timeoutPromise]);
+      if (ageResult && ageResult.createdDate) {
         domainAge = { ageText: ageResult.ageText, createdDate: ageResult.createdDate, ageInDays: ageResult.ageInDays, registrar: ageResult.registrar };
       }
-    } catch (e) { /* domain age is best-effort */ }
+    } catch (e) { /* domain age is best-effort — never block the response */ }
 
     console.log(`  -> ${overallStatus} | Words:${contentAnalysis.details.wordCount} Unique:${contentAnalysis.details.uniqueWordCount} | Valid:${genuinelyValid} | Age:${domainAge?.ageText || 'N/A'}`);
     const result = { domain, timestamp, overallStatus, statusColor, isGenuinelyValid:genuinelyValid, dns:dnsResults, ssl:sslResults, http:httpStatus, content:contentAnalysis, domainAge };
     res.json(result);
   } catch (err) {
     console.error(`  -> ERROR: ${err.message}`);
-    res.json({ domain, timestamp: new Date().toISOString(), overallStatus:'ERROR', statusColor:'red', isGenuinelyValid:false, error:err.message });
+    res.json({ domain, timestamp: new Date().toISOString(), overallStatus:'ERROR', statusColor:'red', isGenuinelyValid:false, error:err.message, domainAge:null });
   }
 });
 
@@ -1767,6 +1769,15 @@ const rawInput = decodeHTML(String(rawAddress));
   
    // Clean up city - remove any trailing state/zip and block ZIP in city
    result.city = cleanToken(result.city).replace(/\s+[A-Za-z]{2}\s*\d{5}.*$/i, '').replace(/\s+[A-Za-z]{2}\s*$/i, '').trim();
+   // Strip leading street suffix words that bled into city (e.g., "Lane Cape Coral" -> "Cape Coral")
+   const streetSuffixes = new Set(['street','st','road','rd','avenue','ave','boulevard','blvd','lane','ln','drive','dr','court','ct','way','place','pl','circle','cir','trail','trl','parkway','pkwy','highway','hwy','terrace','ter','pike']);
+   {
+     let cityWords = result.city.split(/\s+/);
+     while (cityWords.length > 0 && streetSuffixes.has(cityWords[0].toLowerCase().replace(/\.$/,''))) {
+       cityWords.shift();
+     }
+     result.city = cityWords.join(' ');
+   }
    if (/^\d{5}$/.test(result.city)) {
      if (!result.zip) result.zip = result.city;
      result.city = '';
@@ -2205,7 +2216,9 @@ function extractBusinessNameCheerio(html) {
   if (titleText) {
     let name = titleText.split('|')[0].split('-')[0].split('–')[0].split('—')[0].trim();
     name = cleanBizName(name);
-    if (name && name.length > 2 && name.length < 80 && !isBoilerplateName(name)) {
+    // Reject very short single-word names from title (e.g. "New", "Home", "Site")
+    const isTooShort = name && name.length < 5 && !name.includes(' ');
+    if (name && name.length > 2 && name.length < 80 && !isTooShort && !isBoilerplateName(name)) {
       return { name, source: 'title', confidence: 70 };
     }
   }
@@ -2336,6 +2349,7 @@ async function extractBusinessInfo(html, domain) {
     return (
       t.length < 4 ||
       /^home$/i.test(t) ||
+      /^(new|old|best|top|free|site|page|main|test|info|web|app|start|next|now|more)$/i.test(t) ||
       /^(welcome|contact|about|services?|our services|our team|our work|my blog|blog|portfolio|gallery)$/i.test(t) ||
       /^(my|our)\s+(wordpress|blog|site|website|page)/i.test(t) ||
       /\.(com|net|org|info|biz|edu)$/i.test(t) ||
