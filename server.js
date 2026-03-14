@@ -1118,33 +1118,48 @@ function extractOGMeta(html) {
 
 function extractContactInfo(html, bodyText) {
   const result = { phones:[], emails:[], rawAddress:null };
+  const $ = cheerio.load(html);
+  const emailFalsePositives = /example\.com|test\.com|email\.com|yourdomain|sentry\.io|wixpress|google\.com|facebook\.com|w3\.org|schema\.org|jquery|wordpress|gravatar|godaddy/;
 
-  // Emails from mailto: links (most reliable)
-  const mailtoMatches = html.match(/mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/gi) || [];
-  mailtoMatches.forEach(m => {
-    const email = m.replace(/^mailto:/i, '').toLowerCase();
-    if (!result.emails.includes(email) && !/example\.com|test\.com|email\.com|yourdomain/.test(email)) result.emails.push(email);
+  // 1. Emails from mailto: links via cheerio (most reliable)
+  $('a[href^="mailto:"]').each((_, el) => {
+    const href = $(el).attr('href') || '';
+    const email = href.replace(/^mailto:/i, '').split('?')[0].toLowerCase().trim();
+    if (email && /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(email) &&
+        !result.emails.includes(email) && !emailFalsePositives.test(email)) {
+      result.emails.push(email);
+    }
   });
 
-  // Emails from text (less reliable, filter false positives)
+  // 2. Emails from visible text (less reliable, filter false positives)
   const textEmails = bodyText.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g) || [];
   textEmails.forEach(e => {
     const email = e.toLowerCase();
-    if (!result.emails.includes(email) && !/example\.com|test\.com|email\.com|yourdomain|sentry\.io|wixpress|google\.com|facebook\.com|w3\.org|schema\.org|jquery|wordpress|gravatar|godaddy/.test(email)) result.emails.push(email);
+    if (!result.emails.includes(email) && !emailFalsePositives.test(email)) result.emails.push(email);
   });
 
   // Helper: format raw digits to US phone
   function formatPhone(digits) {
     if (digits.length === 11 && digits.startsWith('1')) digits = digits.substring(1);
     if (digits.length === 10) return '(' + digits.substring(0,3) + ') ' + digits.substring(3,6) + '-' + digits.substring(6);
-    return digits; // international or unusual
+    return digits;
   }
 
-  // Phone numbers from BODY TEXT first (already formatted by the website)
-    const phonePatterns = [
-    /\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}/g,           // (xxx) xxx-xxxx
-    /\+1[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/g, // +1 xxx xxx xxxx
-    /\+\d{1,3}[\s.\-]?\d{2,4}[\s.\-]?\d{3,4}[\s.\-]?\d{3,4}/g // international
+  // 3. Phone numbers from tel: links via cheerio (most reliable)
+  $('a[href^="tel:"]').each((_, el) => {
+    const href = $(el).attr('href') || '';
+    const raw = href.replace(/^tel:/i, '').trim();
+    const digits = raw.replace(/\D/g, '');
+    if (digits.length >= 7 && !result.phones.some(ep => ep.replace(/\D/g, '') === digits)) {
+      result.phones.push(formatPhone(digits));
+    }
+  });
+
+  // 4. Phone numbers from body text (already formatted by the website)
+  const phonePatterns = [
+    /\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}/g,
+    /\+1[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/g,
+    /\+\d{1,3}[\s.\-]?\d{2,4}[\s.\-]?\d{3,4}[\s.\-]?\d{3,4}/g
   ];
   phonePatterns.forEach(p => {
     const matches = bodyText.match(p) || [];
@@ -1156,17 +1171,6 @@ function extractContactInfo(html, bodyText) {
     });
   });
 
-  // Phone numbers from tel: links (fallback — format the raw digits)
-  const telMatches = html.match(/tel:([+\d\s\-().]+)/gi) || [];
-  telMatches.forEach(m => {
-    let raw = m.replace(/^tel:/i, '').trim();
-    let digits = raw.replace(/\D/g, '');
-    if (digits.length >= 7 && !result.phones.some(ep => ep.replace(/\D/g, '') === digits)) {
-      // Format it since tel: links are usually just raw digits
-      result.phones.push(formatPhone(digits));
-    }
-  });
-
   return result;
 }
 
@@ -1175,87 +1179,75 @@ function extractContactInfo(html, bodyText) {
 
 function extractStructuredAddress(html) {
   const results = [];
+  const $ = cheerio.load(html);
 
-  // 1. Microdata: itemprop="address" or itemtype PostalAddress
-  const microdataBlocks = html.match(/<[^>]*itemtype=["'][^"']*PostalAddress[^"']*["'][^>]*>[\s\S]*?(?:<\/[a-z]+>)/gi) || [];
-  for (const block of microdataBlocks) {
-    const addr = {};
-    const get = (prop) => {
-      const m = block.match(new RegExp('itemprop=["\']' + prop + '["\'][^>]*>([^<]+)', 'i'))
-        || block.match(new RegExp('itemprop=["\']' + prop + '["\'][^>]*content=["\']([^"\']+)', 'i'));
-      return m ? m[1].trim() : null;
-    };
-    addr.street = get('streetAddress');
-    addr.city = get('addressLocality');
-    addr.state = get('addressRegion');
-    addr.zip = get('postalCode');
-    if (addr.street || addr.city) results.push(addr);
+  // Helper: get itemprop text content or content attribute
+  function getItemprop($scope, prop) {
+    const el = $scope.find(`[itemprop="${prop}"]`).first();
+    if (!el.length) return null;
+    return (el.attr('content') || el.text()).trim() || null;
   }
+
+  // 1. Microdata: itemtype PostalAddress blocks
+  $('[itemtype*="PostalAddress"]').each((_, el) => {
+    const $block = $(el);
+    const addr = {
+      street: getItemprop($block, 'streetAddress'),
+      city:   getItemprop($block, 'addressLocality'),
+      state:  getItemprop($block, 'addressRegion'),
+      zip:    getItemprop($block, 'postalCode'),
+    };
+    if (addr.street || addr.city) results.push(addr);
+  });
 
   // 2. itemprop attributes scattered (not wrapped in a PostalAddress block)
   if (results.length === 0) {
-    const addr = {};
-    const getItp = (prop) => {
-      const m = html.match(new RegExp('itemprop=["\']' + prop + '["\'][^>]*>([^<]{2,60})', 'i'))
-        || html.match(new RegExp('itemprop=["\']' + prop + '["\'][^>]*content=["\']([^"\']{2,60})', 'i'));
-      return m ? m[1].trim() : null;
+    const $doc = $.root();
+    const addr = {
+      street: getItemprop($doc, 'streetAddress'),
+      city:   getItemprop($doc, 'addressLocality'),
+      state:  getItemprop($doc, 'addressRegion'),
+      zip:    getItemprop($doc, 'postalCode'),
     };
-    addr.street = getItp('streetAddress');
-    addr.city = getItp('addressLocality');
-    addr.state = getItp('addressRegion');
-    addr.zip = getItp('postalCode');
     if (addr.street || addr.city) results.push(addr);
   }
 
-  // 3. hCard / vCard: class="adr", class="street-address", class="locality"
-  const hcardBlock = html.match(/<[^>]*class=["'][^"']*\badr\b[^"']*["'][^>]*>[\s\S]*?(?:<\/(?:div|address|section|span|p)>)/gi) || [];
-  for (const block of hcardBlock) {
-    const addr = {};
-    const getClass = (cls) => {
-      const m = block.match(new RegExp('class=["\'][^"\']*\\b' + cls + '\\b[^"\']*["\'][^>]*>([^<]+)', 'i'));
-      return m ? m[1].trim() : null;
+  // 3. hCard / vCard: class="adr"
+  $('.adr').each((_, el) => {
+    const $block = $(el);
+    const addr = {
+      street: $block.find('.street-address').first().text().trim() || null,
+      city:   $block.find('.locality').first().text().trim() || null,
+      state:  $block.find('.region').first().text().trim() || null,
+      zip:    $block.find('.postal-code').first().text().trim() || null,
     };
-    addr.street = getClass('street-address');
-    addr.city = getClass('locality');
-    addr.state = getClass('region');
-    addr.zip = getClass('postal-code');
     if (addr.street || addr.city) results.push(addr);
-  }
+  });
 
   // 4. <address> HTML element — often contains actual address
-  const addressTags = html.match(/<address[^>]*>([\s\S]*?)<\/address>/gi) || [];
-  for (const tag of addressTags) {
-    const text = tag.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim();
-    // Only use if it looks like it has an actual address (contains a number and either state code or ZIP)
+  $('address').each((_, el) => {
+    const text = $(el).text().replace(/\s+/g, ' ').trim();
     if (/\d{1,6}\s+[A-Za-z]/.test(text) && (/\b[A-Z]{2}\b/i.test(text) || /\d{5}/.test(text))) {
       results.push({ raw: text });
     }
-  }
+  });
 
-  // 5. Footer address extraction — look for address-like content in footer
-  const footerMatch = html.match(/<footer[^>]*>([\s\S]*?)<\/footer>/i);
-  if (footerMatch) {
-    const footerText = footerMatch[1].replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim();
-    // Full address in footer: "123 Main St, City, ST 12345"
+  // 5. Footer address extraction via cheerio
+  const $footer = $('footer').first();
+  if ($footer.length) {
+    $footer.find('script, style').remove();
+    const footerText = $footer.text().replace(/\s+/g, ' ').trim();
     const footerAddr = footerText.match(/(\d{1,6}\s+[A-Za-z][A-Za-z0-9\s.#'&/,-]{2,60}?\s+(?:Street|St\.?|Avenue|Ave\.?|Boulevard|Blvd\.?|Drive|Dr\.?|Road|Rd\.?|Lane|Ln\.?|Way|Court|Ct\.?|Place|Pl\.?|Circle|Cir\.?|Trail|Trl\.?|Parkway|Pkwy\.?|Highway|Hwy\.?|Terrace|Ter\.?|Pike)\.?(?:[,\s]+[A-Za-z][A-Za-z\s.'-]{1,40}[,\s]+[A-Z]{2}\s*\d{5}(?:-\d{4})?)?)/i);
     if (footerAddr) results.push({ raw: footerAddr[0].trim() });
   }
 
-  // 6. Labeled address patterns: "Address:", "Located at:", "Our office:", "Mailing Address:"
-  const bodyText = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim();
-  const bodyTextWithBreaks = decodeHTML(
-    html
-      .replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[\s\S]*?<\/style>/gi, '')
-      .replace(/<br\s*\/?\s*>/gi, '\n')
-      .replace(/<\/(?:p|div|section|article|li|h\d|footer|address)>/gi, '\n')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/gi, ' ')
-  );
+  // 6. Labeled address patterns from visible text
+  $('script, style').remove();
+  const bodyText = $.text().replace(/\s+/g, ' ').trim();
 
   const addRawCandidate = (value) => {
     if (!value) return;
-    const cleaned = decodeHTML(value).replace(/\s+/g, ' ').trim();
+    const cleaned = value.replace(/\s+/g, ' ').trim();
     if (!cleaned || cleaned.length < 8) return;
     if (!results.some(r => r.raw && r.raw.toLowerCase() === cleaned.toLowerCase())) {
       results.push({ raw: cleaned });
@@ -1271,32 +1263,28 @@ function extractStructuredAddress(html) {
     if (lm) { addRawCandidate(lm[1]); break; }
   }
 
-  // 7. Rendered address widgets used by site builders (Duda/Thryv/etc)
-  const renderedAddressBlocks = html.match(/<[^>]*(?:data-route=["']address["']|data-aid=["'][^"']*ADDRESS_RENDERED[^"']*["'])[^>]*>([\s\S]*?)<\/(?:h\d|p|div|span|address)>/gi) || [];
-  for (const block of renderedAddressBlocks) {
-    const text = decodeHTML(block.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
-    if (!text) continue;
+  // 7. Rendered address widgets used by site builders (Duda/Thryv/etc) via cheerio
+  const $reload = cheerio.load(html);
+  $reload('[data-route="address"], [data-aid*="ADDRESS_RENDERED"]').each((_, el) => {
+    const text = $reload(el).text().replace(/\s+/g, ' ').trim();
+    if (!text) return;
 
-    // Extract the address-like slice from mixed text (e.g., "Sign up Elite Glass Trim 4729 Ramus, Building A...")
     const embeddedStreet = text.match(/(\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9\s.#'&/,-]{3,120},\s*[A-Za-z][A-Za-z\s.'-]{1,40},\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?(?:,\s*(?:US|USA|United\s+States))?)/i);
     const embeddedPoBox = text.match(/((?:P\.?\s*O\.?|Post\s+Office)\s*Box\s*#?\s*[A-Z0-9-]{1,20}(?:\s*,?\s*[A-Za-z][A-Za-z\s.'-]{1,40}\s*,?\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)?)/i);
 
     if (embeddedStreet) addRawCandidate(embeddedStreet[1]);
     else if (embeddedPoBox) addRawCandidate(embeddedPoBox[1]);
     else if (/\b(?:[A-Z]{2}\s*\d{5}(?:-\d{4})?|\d{5}(?:-\d{4})?)\b/.test(text)) addRawCandidate(text);
-  }
+  });
 
   // 8. PO Box style addresses (common on contact pages)
-  const poBoxLinePatterns = [
-    /(?:^|[\s,;])((?:P\.?\s*O\.?|Post\s+Office)\s*Box\s*#?\s*[A-Z0-9-]{1,20}\s*,?\s*[A-Za-z][A-Za-z\s.'-]{1,40}\s*,?\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)/i,
-    /(?:^|[\s,;])((?:P\.?\s*O\.?|Post\s+Office)\s*Box\s*#?\s*[A-Z0-9-]{1,20})/i
+  const poBoxPatterns = [
+    /((?:P\.?\s*O\.?|Post\s+Office)\s*Box\s*#?\s*[A-Z0-9-]{1,20}\s*,?\s*[A-Za-z][A-Za-z\s.'-]{1,40}\s*,?\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)/gi,
+    /((?:P\.?\s*O\.?|Post\s+Office)\s*Box\s*#?\s*[A-Z0-9-]{1,20})/gi
   ];
-  const lines = bodyTextWithBreaks.split(/\r?\n+/).map(l => l.trim()).filter(Boolean);
-  for (const line of lines) {
-    for (const pat of poBoxLinePatterns) {
-      const m = line.match(pat);
-      if (m) { addRawCandidate(m[1]); break; }
-    }
+  for (const pat of poBoxPatterns) {
+    const matches = bodyText.match(pat) || [];
+    matches.forEach(m => addRawCandidate(m));
   }
   return results;
 }
@@ -1306,66 +1294,67 @@ function extractStructuredAddress(html) {
 
 function extractEnhancedBusinessName(html) {
   const candidates = [];
+  const $ = cheerio.load(html);
 
-  // 1. Logo alt text — very reliable business name source
-  const logoPatterns = [
-    /<(?:img|a)[^>]*class=["'][^"']*\blogo\b[^"']*["'][^>]*alt=["']([^"']{2,80})["']/i,
-    /<(?:img|a)[^>]*alt=["']([^"']{2,80})["'][^>]*class=["'][^"']*\blogo\b[^"']*["']/i,
-    /<(?:img|a)[^>]*id=["'][^"']*logo[^"']*["'][^>]*alt=["']([^"']{2,80})["']/i,
-    /<(?:img|a)[^>]*alt=["']([^"']{2,80})["'][^>]*id=["'][^"']*logo[^"']*["']/i,
-    /<img[^>]*class=["'][^"']*\bsite[-_]?logo\b[^"']*["'][^>]*alt=["']([^"']{2,80})["']/i,
-    /<img[^>]*class=["'][^"']*\bbrand\b[^"']*["'][^>]*alt=["']([^"']{2,80})["']/i,
-    /<img[^>]*class=["'][^"']*\bheader[-_]?logo\b[^"']*["'][^>]*alt=["']([^"']{2,80})["']/i,
-    /<img[^>]*class=["'][^"']*\bcustom[-_]?logo\b[^"']*["'][^>]*alt=["']([^"']{2,80})["']/i,
+  // 1. Logo alt text via cheerio — very reliable business name source
+  // Matches: class/id containing "logo", "brand", "site-logo", "header-logo", "custom-logo"
+  const logoSelectors = [
+    'img.logo', 'a.logo', 'img[class*="logo"]', 'a[class*="logo"]',
+    'img[id*="logo"]', 'a[id*="logo"]',
+    'img.brand', 'img[class*="site-logo"]', 'img[class*="header-logo"]',
+    'img[class*="custom-logo"]',
   ];
-  for (const pat of logoPatterns) {
-    const m = html.match(pat);
-    if (m && m[1] && m[1].trim().length > 2) {
-      const name = m[1].trim().replace(/\s*logo\s*/gi, '').trim();
-      if (name.length > 2 && !/^(logo|image|img|banner|header|icon|photo|pic)$/i.test(name)) {
-        candidates.push({ name, source: 'logo-alt', priority: 8 });
+  for (const sel of logoSelectors) {
+    $(sel).each((_, el) => {
+      const alt = $(el).attr('alt') || '';
+      if (alt.trim().length > 2) {
+        const name = alt.trim().replace(/\s*logo\s*/gi, '').trim();
+        if (name.length > 2 && !/^(logo|image|img|banner|header|icon|photo|pic)$/i.test(name)) {
+          candidates.push({ name, source: 'logo-alt', priority: 8 });
+        }
       }
-    }
+    });
+    if (candidates.length > 0) break; // first match wins
   }
 
-  // 2. aria-label on header/nav — often contains business name
-  const ariaMatch = html.match(/<(?:header|nav)[^>]*aria-label=["']([^"']{3,80})["']/i);
-  if (ariaMatch) {
-    const name = ariaMatch[1].trim().replace(/\s*(main\s+)?(navigation|menu|header)\s*/gi, '').trim();
+  // 2. aria-label on header/nav via cheerio
+  $('header[aria-label], nav[aria-label]').each((_, el) => {
+    const label = $(el).attr('aria-label') || '';
+    const name = label.trim().replace(/\s*(main\s+)?(navigation|menu|header)\s*/gi, '').trim();
     if (name.length > 2 && !/^(main|navigation|menu|header|sidebar|footer|content)$/i.test(name)) {
       candidates.push({ name, source: 'aria-label', priority: 6 });
     }
+  });
+
+  // 3. meta application-name via cheerio
+  const appName = $('meta[name="application-name"]').attr('content');
+  if (appName && appName.trim().length > 1) {
+    candidates.push({ name: appName.trim(), source: 'application-name', priority: 7 });
   }
 
-  // 3. meta application-name
-  const appNameMatch = html.match(/<meta[^>]*name=["']application-name["'][^>]*content=["']([^"']{2,80})["']/i);
-  if (appNameMatch) {
-    candidates.push({ name: appNameMatch[1].trim(), source: 'application-name', priority: 7 });
+  // 4. meta apple-mobile-web-app-title via cheerio
+  const appleTitle = $('meta[name="apple-mobile-web-app-title"]').attr('content');
+  if (appleTitle && appleTitle.trim().length > 1) {
+    candidates.push({ name: appleTitle.trim(), source: 'apple-title', priority: 7 });
   }
 
-  // 4. meta apple-mobile-web-app-title
-  const appleTitleMatch = html.match(/<meta[^>]*name=["']apple-mobile-web-app-title["'][^>]*content=["']([^"']{2,80})["']/i);
-  if (appleTitleMatch) {
-    candidates.push({ name: appleTitleMatch[1].trim(), source: 'apple-title', priority: 7 });
+  // 5. Twitter card site name via cheerio
+  const twitterTitle = $('meta[name="twitter:title"], meta[property="twitter:title"]').attr('content');
+  if (twitterTitle && twitterTitle.trim().length > 1) {
+    candidates.push({ name: twitterTitle.trim(), source: 'twitter-title', priority: 5 });
   }
 
-  // 5. Twitter card site name
-  const twitterSiteMatch = html.match(/<meta[^>]*(?:name|property)=["']twitter:title["'][^>]*content=["']([^"']{2,80})["']/i);
-  if (twitterSiteMatch) {
-    candidates.push({ name: twitterSiteMatch[1].trim(), source: 'twitter-title', priority: 5 });
-  }
-
-  // 6. itemprop="name" on Organization/LocalBusiness (not inside script)
-  const itempropName = html.match(/<[^>]*itemprop=["']name["'][^>]*>([^<]{2,80})/i);
-  if (itempropName) {
-    const name = itempropName[1].trim();
+  // 6. itemprop="name" via cheerio (not inside script)
+  $('[itemprop="name"]').not('script [itemprop="name"]').each((_, el) => {
+    const name = $(el).text().trim();
     if (name.length > 2 && !isBoilerplateName(name)) {
       candidates.push({ name, source: 'itemprop-name', priority: 9 });
     }
-  }
+  });
 
-  // 7. Copyright with full business name (anywhere in page, not just footer)
-  const copyrightMatch = html.match(/(?:©|&copy;|copyright)\s*(?:\d{4}\s*[-–]?\s*\d{0,4}\s*)?([A-Z][A-Za-z\s&'.,-]{2,60}?(?:LLC|Inc\.?|Corp\.?|Company|Co\.?|Ltd\.?|Group|Partners|Associates|Enterprises?))/i);
+  // 7. Copyright with full business name (regex on text — this is text pattern matching, not DOM)
+  const bodyText = $.text();
+  const copyrightMatch = bodyText.match(/(?:©|copyright)\s*(?:\d{4}\s*[-–]?\s*\d{0,4}\s*)?([A-Z][A-Za-z\s&'.,-]{2,60}?(?:LLC|Inc\.?|Corp\.?|Company|Co\.?|Ltd\.?|Group|Partners|Associates|Enterprises?))/i);
   if (copyrightMatch) {
     candidates.push({ name: copyrightMatch[1].trim(), source: 'copyright-legal', priority: 10 });
   }
@@ -1375,7 +1364,7 @@ function extractEnhancedBusinessName(html) {
 
 function extractSchemaOrg(html) {
   const result = { name:null, phone:null, email:null, address:null, description:null, type:null, url:null, priceRange:null, rating:null, hours:[], legalName:null };
-  const ldMatches = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi) || [];
+  const $ = cheerio.load(html);
 
   // Helper: recursively extract business-relevant items from nested JSON-LD
   function processItem(item) {
@@ -1426,14 +1415,15 @@ function extractSchemaOrg(html) {
     }
   }
 
-  for (const block of ldMatches) {
+  $('script[type="application/ld+json"]').each((_, el) => {
     try {
-      const jsonText = block.replace(/<script[^>]*>/i, '').replace(/<\/script>/i, '').trim();
-      const data = JSON.parse(jsonText);
+      const jsonText = $(el).html();
+      if (!jsonText) return;
+      const data = JSON.parse(jsonText.trim());
       const items = Array.isArray(data) ? data : data['@graph'] ? data['@graph'] : [data];
       for (const item of items) processItem(item);
     } catch (e) { /* ignore bad JSON-LD */ }
-  }
+  });
   return result;
 }
 
@@ -1468,13 +1458,12 @@ const SOCIAL_PLATFORMS = {
 
 function extractSocialSignals(html, schema) {
   const signals = {};
+  const $ = cheerio.load(html);
 
-  // 1. Extract from Schema.org sameAs (most reliable)
-  const ldMatches = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi) || [];
-  for (const block of ldMatches) {
+  // 1. Extract from Schema.org sameAs via cheerio (most reliable)
+  $('script[type="application/ld+json"]').each((_, el) => {
     try {
-      const jsonText = block.replace(/<script[^>]*>/i, '').replace(/<\/script>/i, '').trim();
-      const data = JSON.parse(jsonText);
+      const data = JSON.parse($(el).html().trim());
       const items = Array.isArray(data) ? data : data['@graph'] ? data['@graph'] : [data];
       for (const item of items) {
         const sameAs = item.sameAs;
@@ -1484,34 +1473,35 @@ function extractSocialSignals(html, schema) {
         }
       }
     } catch {}
-  }
-
-  // 2. Extract from <a href="..."> links containing social media domains
-  const linkMatches = html.match(/<a\s[^>]*href=["']([^"']+)["'][^>]*>/gi) || [];
-  for (const tag of linkMatches) {
-    const hrefMatch = tag.match(/href=["']([^"']+)["']/i);
-    if (hrefMatch) {
-      classifySocialUrl(hrefMatch[1], signals);
-    }
-  }
-
-  // 3. Extract from og:see_also or meta social tags
-  const metaSocial = html.match(/<meta[^>]*(?:property|name)=["'][^"']*social[^"']*["'][^>]*content=["']([^"']+)["']/gi) || [];
-  metaSocial.forEach(m => {
-    const cm = m.match(/content=["']([^"']+)["']/i);
-    if (cm) classifySocialUrl(cm[1], signals);
   });
 
-  // 4. Extract Google Business Profile from map embeds or g.page links
-  const gPageMatch = html.match(/https?:\/\/g\.page\/[^\s"'<>]+/gi) || [];
-  gPageMatch.forEach(url => {
-    if (!signals.googlebiz) signals.googlebiz = { platform: 'Google Business', url: url.replace(/["'>\s].*/,''), source: 'gpage' };
+  // 2. Extract from <a href="..."> links via cheerio
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href');
+    if (href) classifySocialUrl(href, signals);
   });
 
-  // 5. Extract from Google Maps links
-  const gMapsMatch = html.match(/https?:\/\/(?:www\.)?google\.com\/maps\/place\/[^\s"'<>]+/gi) || [];
-  gMapsMatch.forEach(url => {
-    if (!signals.googlebiz) signals.googlebiz = { platform: 'Google Business', url: url.replace(/["'>\s].*/,''), source: 'maps' };
+  // 3. Extract from meta social tags via cheerio
+  $('meta[property*="social"], meta[name*="social"]').each((_, el) => {
+    const content = $(el).attr('content');
+    if (content) classifySocialUrl(content, signals);
+  });
+
+  // 4. Extract Google Business Profile from g.page links via cheerio
+  $('a[href*="g.page"]').each((_, el) => {
+    const href = $(el).attr('href');
+    if (href && !signals.googlebiz) signals.googlebiz = { platform: 'Google Business', url: href, source: 'gpage' };
+  });
+
+  // 5. Extract from Google Maps links via cheerio
+  $('a[href*="google.com/maps/place"]').each((_, el) => {
+    const href = $(el).attr('href');
+    if (href && !signals.googlebiz) signals.googlebiz = { platform: 'Google Business', url: href, source: 'maps' };
+  });
+  // Also check iframes for embedded Google Maps
+  $('iframe[src*="google.com/maps"]').each((_, el) => {
+    const src = $(el).attr('src');
+    if (src && !signals.googlebiz) signals.googlebiz = { platform: 'Google Business', url: src, source: 'maps-embed' };
   });
 
   // Convert to clean array format
