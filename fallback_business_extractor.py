@@ -23,7 +23,14 @@ OUTPUT_TEMPLATE = {
 }
 
 # Fallback regex patterns (used only when usaddress is unavailable)
-CITY_STATE_ZIP_RE = re.compile(r"([A-Za-z\s]+),?\s([A-Za-z]{2})\s(\d{5})")
+CITY_STATE_ZIP_RE = re.compile(r"(?:,\s*|\b)([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){0,3}),?\s+([A-Za-z]{2})\s+(\d{5})")
+
+_STREET_SUFFIXES = frozenset([
+    "street", "st", "road", "rd", "avenue", "ave", "boulevard", "blvd",
+    "lane", "ln", "drive", "dr", "court", "ct", "way", "place", "pl",
+    "circle", "cir", "trail", "trl", "parkway", "pkwy", "highway", "hwy",
+    "terrace", "ter", "pike",
+])
 ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
 STATE_RE = re.compile(r"\b(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b", re.IGNORECASE)
 STREET_RE = re.compile(
@@ -111,7 +118,13 @@ def _extract_city_state_zip(text):
     match = CITY_STATE_ZIP_RE.search(_clean_text(text))
     if not match:
         return "", "", ""
-    return _clean_text(match.group(1)), match.group(2).upper(), match.group(3)
+    city = _clean_text(match.group(1))
+    # Strip leading street suffix words that bled into the city
+    city_words = city.split()
+    while city_words and city_words[0].lower() in _STREET_SUFFIXES:
+        city_words.pop(0)
+    city = " ".join(city_words)
+    return city, match.group(2).upper(), match.group(3)
 
 
 def _extract_street(text):
@@ -159,6 +172,41 @@ def _result(confidence, business_name="", street_address="", city="", state="", 
     return out
 
 
+def _method_og_site_name(soup):
+    """Extract business name from og:site_name meta tag — confidence 88."""
+    tag = soup.find("meta", attrs={"property": "og:site_name"})
+    if tag:
+        name = _clean_business_name(tag.get("content", ""))
+        if name and len(name) > 1:
+            return _result(88, business_name=name)
+    return _result(0)
+
+
+def _method_itemprop_name(soup):
+    """Extract business name from itemprop='name' — confidence 85."""
+    tag = soup.find(attrs={"itemprop": "name"})
+    if tag:
+        name = _clean_business_name(tag.get_text(" ", strip=True))
+        if name and len(name) > 1:
+            return _result(85, business_name=name)
+    return _result(0)
+
+
+def _method_meta_names(soup):
+    """Extract business name from application-name or og:title — confidence 80."""
+    for attr, val, conf in [
+        ("name", "application-name", 82),
+        ("name", "apple-mobile-web-app-title", 80),
+        ("property", "og:title", 78),
+    ]:
+        tag = soup.find("meta", attrs={attr: val})
+        if tag:
+            name = _clean_business_name(tag.get("content", ""))
+            if name and len(name) > 1:
+                return _result(conf, business_name=name)
+    return _result(0)
+
+
 def _method_title_name(soup):
     title = soup.title.get_text(" ", strip=True) if soup.title else ""
     if not title:
@@ -166,7 +214,7 @@ def _method_title_name(soup):
     title = re.sub(r"\b(Home|Welcome|Official Website)\b", "", title, flags=re.IGNORECASE)
     title = re.split(r"\s*[|\-–:]\s*", title)[0]
     title = _clean_business_name(title)
-    return _result(60, business_name=title) if title else _result(0)
+    return _result(70, business_name=title) if title else _result(0)
 
 
 def _method_footer_scan(soup):
@@ -319,6 +367,9 @@ def extract_fallback_business_data(html_content, page_url=""):
 
     candidates = [
         schema_result,
+        _method_og_site_name(soup),
+        _method_itemprop_name(soup),
+        _method_meta_names(soup),
         _method_footer_scan(soup),
         _method_regex_page_text(visible_text),
         _method_google_maps_embed(soup),
