@@ -43,6 +43,13 @@ _BOILERPLATE_EDGE_WORDS = re.compile(
     re.IGNORECASE,
 )
 
+_BOILERPLATE_NAMES = re.compile(
+    r"^(just a moment|checking your browser|attention required|verify you are human|"
+    r"access denied|forbidden|not found|error|page not found|default page|"
+    r"404|403|500|502|503|home|index|untitled|default|new|new page)$",
+    re.IGNORECASE,
+)
+
 
 def _clean_text(text):
     text = text or ""
@@ -56,6 +63,8 @@ def _clean_business_name(name):
     cleaned = _clean_text(name)
     cleaned = _BOILERPLATE_EDGE_WORDS.sub("", cleaned).strip()
     cleaned = re.sub(r"^\s*[-–—:|]+\s*|\s*[-–—:|]+\s*$", "", cleaned).strip()
+    if _BOILERPLATE_NAMES.match(cleaned):
+        return ""
     return cleaned
 
 

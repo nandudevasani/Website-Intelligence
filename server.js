@@ -90,7 +90,14 @@ function isBoilerplateName(s) {
     /under\s+construction/i.test(t) ||
     /\b(for sale|park model|for sale by owner|fsbo|listing)\b/i.test(t) ||
     /^(home|index|untitled|default|new|new page|page \d+)$/i.test(t) ||
-    /^(hello world|sample page|test page)$/i.test(t)
+    /^(hello world|sample page|test page)$/i.test(t) ||
+    /just a moment/i.test(t) ||
+    /checking your browser/i.test(t) ||
+    /attention required/i.test(t) ||
+    /verify you are human/i.test(t) ||
+    /access denied/i.test(t) ||
+    /^(forbidden|not found|error|error \d+|page not found|404|403|500|502|503)$/i.test(t) ||
+    /^default page$/i.test(t)
   );
 }
 
@@ -223,14 +230,18 @@ const KNOWN_WEB_APP_PATTERNS = [
 
 // === DNS ANALYSIS ===
 
+function dnsWithTimeout(promise, ms = 8000) {
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('dns-timeout')), ms))]);
+}
+
 async function analyzeDNS(domain) {
   const r = { hasARecord:false, hasMXRecord:false, hasNSRecord:false, aRecords:[], mxRecords:[], nsRecords:[], cnameRecords:[], txtRecords:[], error:null };
   try {
-    try { const a = await dns.promises.resolve4(domain); r.aRecords = a; r.hasARecord = a.length > 0; } catch {}
-    try { const mx = await dns.promises.resolveMx(domain); r.mxRecords = mx.map(x => ({ priority:x.priority, exchange:x.exchange })); r.hasMXRecord = mx.length > 0; } catch {}
-    try { const ns = await dns.promises.resolveNs(domain); r.nsRecords = ns; r.hasNSRecord = ns.length > 0; } catch {}
-    try { const cn = await dns.promises.resolveCname(domain); r.cnameRecords = cn; } catch {}
-    try { const tx = await dns.promises.resolveTxt(domain); r.txtRecords = tx.map(x => x.join('')); } catch {}
+    try { const a = await dnsWithTimeout(dns.promises.resolve4(domain)); r.aRecords = a; r.hasARecord = a.length > 0; } catch {}
+    try { const mx = await dnsWithTimeout(dns.promises.resolveMx(domain)); r.mxRecords = mx.map(x => ({ priority:x.priority, exchange:x.exchange })); r.hasMXRecord = mx.length > 0; } catch {}
+    try { const ns = await dnsWithTimeout(dns.promises.resolveNs(domain)); r.nsRecords = ns; r.hasNSRecord = ns.length > 0; } catch {}
+    try { const cn = await dnsWithTimeout(dns.promises.resolveCname(domain)); r.cnameRecords = cn; } catch {}
+    try { const tx = await dnsWithTimeout(dns.promises.resolveTxt(domain)); r.txtRecords = tx.map(x => x.join('')); } catch {}
   } catch (e) { r.error = e.message; }
   return r;
 }
@@ -400,6 +411,31 @@ function analyzeContent(html, domain, finalUrl) {
     const href = hm[1];
     return (href.startsWith('/') && href.length > 1 && href !== '/#') || href.includes(domain);
   }).length;
+
+  // ════════════════════════════════════════════════════════════
+  // DETECTION 0: Cloudflare / Bot Challenge Page
+  // ════════════════════════════════════════════════════════════
+
+  const cfChallengeSignals = [
+    /just a moment/i,
+    /checking your browser/i,
+    /verify you are human/i,
+    /enable javascript and cookies/i,
+    /cf-browser-verification/i,
+    /challenge-platform/i,
+    /__cf_bm/i,
+    /managed by cloudflare/i,
+    /ray id:/i,
+    /cloudflare to restrict access/i,
+    /attention required/i,
+  ];
+  const cfHits = cfChallengeSignals.filter(p => p.test(html)).length;
+  if (cfHits >= 2 && analysis.details.wordCount < 200) {
+    analysis.verdict = 'BLOCKED'; analysis.confidence = 90;
+    analysis.reasons.push('Website returned a Cloudflare bot-challenge page instead of real content');
+    analysis.flags.push('BLOCKED', 'CLOUDFLARE_CHALLENGE');
+    return analysis;
+  }
 
   // ════════════════════════════════════════════════════════════
   // DETECTION 1: Cross-Domain Redirect (JS / Meta Refresh)
@@ -748,7 +784,7 @@ app.post('/api/analyze', async (req, res) => {
     let overallStatus = 'UNKNOWN', statusColor = 'gray';
     if (!dnsResults.hasARecord && !httpStatus.isUp) { overallStatus = 'DEAD'; statusColor = 'red'; }
     else if (!httpStatus.isUp) { overallStatus = 'DOWN'; statusColor = 'red'; }
-    else if (isWAFBlock) { overallStatus = 'BLOCKED'; statusColor = 'orange'; }
+    else if (isWAFBlock || contentAnalysis.verdict === 'BLOCKED') { overallStatus = 'BLOCKED'; statusColor = 'orange'; }
     else if (contentAnalysis.verdict === 'CROSS_DOMAIN_REDIRECT') { overallStatus = 'CROSS_DOMAIN_REDIRECT'; statusColor = 'red'; }
     else if (contentAnalysis.verdict === 'PARKED') { overallStatus = 'PARKED'; statusColor = 'orange'; }
     else if (contentAnalysis.verdict === 'COMING_SOON') { overallStatus = 'COMING_SOON'; statusColor = 'yellow'; }
@@ -789,10 +825,12 @@ app.post('/api/analyze/bulk', async (req, res) => {
 
   console.log(`\n[BULK] ${domains.length} domains — batched concurrency (10 at a time)`);
 
-  // Helper: analyze a single domain, never throws
+  // Helper: analyze a single domain, never throws — 30s hard cap per domain
   async function analyzeSingleDomain(rawDomain) {
+    const domain = normalizeDomain(rawDomain);
+    const timeoutMs = 30000;
+    const work = (async () => {
     try {
-      const domain = normalizeDomain(rawDomain);
       const [dnsResults, sslResults, httpResults] = await Promise.all([analyzeDNS(domain), analyzeSSL(domain), analyzeHTTPStatus(domain)]);
       const { result: httpStatus, html } = httpResults;
       const contentAnalysis = analyzeContent(html, domain, httpStatus.finalUrl);
@@ -805,7 +843,7 @@ app.post('/api/analyze/bulk', async (req, res) => {
       let overallStatus = 'UNKNOWN';
       if (!dnsResults.hasARecord && !httpStatus.isUp) overallStatus = 'DEAD';
       else if (!httpStatus.isUp) overallStatus = 'DOWN';
-      else if (isWAFBlock) overallStatus = 'BLOCKED';
+      else if (isWAFBlock || contentAnalysis.verdict === 'BLOCKED') overallStatus = 'BLOCKED';
       else if (contentAnalysis.verdict === 'CROSS_DOMAIN_REDIRECT') overallStatus = 'CROSS_DOMAIN_REDIRECT';
       else if (contentAnalysis.verdict === 'PARKED') overallStatus = 'PARKED';
       else if (contentAnalysis.verdict === 'COMING_SOON') overallStatus = 'COMING_SOON';
@@ -820,10 +858,14 @@ app.post('/api/analyze/bulk', async (req, res) => {
       console.log(`  [OK] ${domain} -> ${overallStatus}`);
       return { domain, overallStatus, isGenuinelyValid:['ACTIVE','POLITICAL_CAMPAIGN'].includes(overallStatus), statusCode:httpStatus.statusCode, verdict:contentAnalysis.verdict, confidence:contentAnalysis.confidence, reasons:contentAnalysis.reasons, flags:contentAnalysis.flags, redirectInfo:contentAnalysis.redirectInfo, title:contentAnalysis.details.title, wordCount:contentAnalysis.details.wordCount, uniqueWordCount:contentAnalysis.details.uniqueWordCount };
     } catch (err) {
-      const domain = normalizeDomain(rawDomain);
       console.log(`  [ERR] ${domain} -> ${err.message}`);
       return { domain, overallStatus:'ERROR', isGenuinelyValid:false, error:err.message };
     }
+    })();
+    return Promise.race([work, new Promise(resolve => setTimeout(() => {
+      console.log(`  [TIMEOUT] ${domain} -> exceeded ${timeoutMs}ms`);
+      resolve({ domain, overallStatus:'ERROR', isGenuinelyValid:false, error:`Analysis timed out after ${timeoutMs/1000}s` });
+    }, timeoutMs))]);
   }
 
   // Process in batches of 10 — parallel within each batch, sequential across batches
