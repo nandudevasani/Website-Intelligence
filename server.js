@@ -119,7 +119,7 @@ function normalizeExtractedBusinessName(name) {
 async function extractBusinessWithPython(html, pageUrl) {
   return new Promise((resolve) => {
     try {
-      const scriptPath = path.join(__dirname, 'python_business_extractor_bridge.py');
+      const scriptPath = path.join(__dirname, 'extractor.py');
       const pythonCmd = process.env.PYTHON_EXTRACTOR_CMD || 'python3';
       const py = spawn(pythonCmd, [scriptPath], { stdio: ['pipe', 'pipe', 'pipe'] });
       let settled = false;
@@ -2814,7 +2814,12 @@ app.post('/api/extract-business', async (req, res) => {
 
     let business = await extractBusinessInfo(html, domain);
 
-    const pythonExtraction = await extractBusinessWithPython(html, httpStatus.finalUrl || `https://${domain}`);
+    // Run Python extraction and prefetch contact page in parallel — saves ~8s when contact page is needed
+    const [pythonExtraction, contactHtml] = await Promise.all([
+      extractBusinessWithPython(html, httpStatus.finalUrl || `https://${domain}`),
+      fetchContactPage(domain, html),
+    ]);
+
     if (pythonExtraction?.ok && pythonExtraction.best) {
       const py = pythonExtraction.best;
       if (!business.businessName && py.business_name) business.businessName = py.business_name;
@@ -2835,38 +2840,33 @@ app.post('/api/extract-business', async (req, res) => {
       console.log(`  [PY-EXTRACT] skipped: ${pythonExtraction?.error || 'unknown error'}`);
     }
 
-
-    // Fetch contact page if street or key data is missing
+    // Use prefetched contact page if key data is still missing
     const needsContactPage = !business.address.street || business.phones.length === 0 || business.emails.length === 0;
-    if (needsContactPage) {
-      const contactHtml = await fetchContactPage(domain, html);
-      if (contactHtml) {
-        const contactBusiness = await extractBusinessInfo(contactHtml, domain);
-        const contactPythonExtraction = await extractBusinessWithPython(contactHtml, `https://${domain}`);
-        if (contactPythonExtraction?.ok && contactPythonExtraction.best) {
-          const cp = contactPythonExtraction.best;
-          if (!contactBusiness.businessName && cp.business_name) contactBusiness.businessName = cp.business_name;
-          if (!contactBusiness.address.street && cp.street_address) contactBusiness.address.street = cp.street_address;
-          if (!contactBusiness.address.city && cp.city) contactBusiness.address.city = cp.city;
-          if (!contactBusiness.address.state && cp.state) contactBusiness.address.state = cp.state;
-          if (!contactBusiness.address.zip && cp.zip_code) contactBusiness.address.zip = cp.zip_code;
-        }
-        // Merge: fill in any blanks from the contact page
-        if (!business.address.street && contactBusiness.address.street) business.address.street = contactBusiness.address.street;
-        if (!business.address.city   && contactBusiness.address.city)   business.address.city   = contactBusiness.address.city;
-        if (!business.address.state  && contactBusiness.address.state)  business.address.state  = contactBusiness.address.state;
-        if (!business.address.zip    && contactBusiness.address.zip)    business.address.zip    = contactBusiness.address.zip;
-        if (business.phones.length === 0 && contactBusiness.phones.length > 0) business.phones = contactBusiness.phones;
-        if (business.emails.length === 0 && contactBusiness.emails.length > 0) business.emails = contactBusiness.emails;
-        // Merge social signals from contact page (add any new platforms not already found)
-        if (contactBusiness.socialSignals && contactBusiness.socialSignals.length > 0) {
-          const existingPlatforms = new Set(business.socialSignals.map(s => s.platform));
-          contactBusiness.socialSignals.forEach(s => {
-            if (!existingPlatforms.has(s.platform)) business.socialSignals.push(s);
-          });
-        }
-        console.log(`  [CONTACT PAGE] merged address/phone/social from contact subpage`);
+    if (needsContactPage && contactHtml) {
+      const contactBusiness = await extractBusinessInfo(contactHtml, domain);
+      const contactPythonExtraction = await extractBusinessWithPython(contactHtml, `https://${domain}`);
+      if (contactPythonExtraction?.ok && contactPythonExtraction.best) {
+        const cp = contactPythonExtraction.best;
+        if (!contactBusiness.businessName && cp.business_name) contactBusiness.businessName = cp.business_name;
+        if (!contactBusiness.address.street && cp.street_address) contactBusiness.address.street = cp.street_address;
+        if (!contactBusiness.address.city && cp.city) contactBusiness.address.city = cp.city;
+        if (!contactBusiness.address.state && cp.state) contactBusiness.address.state = cp.state;
+        if (!contactBusiness.address.zip && cp.zip_code) contactBusiness.address.zip = cp.zip_code;
       }
+      // Merge: fill in any blanks from the contact page
+      if (!business.address.street && contactBusiness.address.street) business.address.street = contactBusiness.address.street;
+      if (!business.address.city   && contactBusiness.address.city)   business.address.city   = contactBusiness.address.city;
+      if (!business.address.state  && contactBusiness.address.state)  business.address.state  = contactBusiness.address.state;
+      if (!business.address.zip    && contactBusiness.address.zip)    business.address.zip    = contactBusiness.address.zip;
+      if (business.phones.length === 0 && contactBusiness.phones.length > 0) business.phones = contactBusiness.phones;
+      if (business.emails.length === 0 && contactBusiness.emails.length > 0) business.emails = contactBusiness.emails;
+      if (contactBusiness.socialSignals && contactBusiness.socialSignals.length > 0) {
+        const existingPlatforms = new Set(business.socialSignals.map(s => s.platform));
+        contactBusiness.socialSignals.forEach(s => {
+          if (!existingPlatforms.has(s.platform)) business.socialSignals.push(s);
+        });
+      }
+      console.log(`  [CONTACT PAGE] merged address/phone/social from contact subpage`);
     }
 
     business.strength = buildBusinessStrengthSignals(business);
