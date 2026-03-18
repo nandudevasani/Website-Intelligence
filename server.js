@@ -273,7 +273,7 @@ function analyzeSSL(domain) {
 
 // === HTTP STATUS ANALYSIS (with retry) ===
 
-async function analyzeHTTPStatus(domain, retries = 2) {
+async function analyzeHTTPStatus(domain, retries = 1) {
   const r = { isUp:false, statusCode:null, statusText:null, responseTime:null, finalUrl:null, redirectChain:[], headers:{}, error:null };
   const start = Date.now();
   const hdrs = {
@@ -289,7 +289,7 @@ async function analyzeHTTPStatus(domain, retries = 2) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       if (attempt > 0) await new Promise(ok => setTimeout(ok, 1000 * attempt)); // backoff
-      const res = await axios.get(buildUrl(domain), { timeout:12000, maxRedirects:10, validateStatus:()=>true, headers:hdrs });
+      const res = await axios.get(buildUrl(domain), { timeout:8000, maxRedirects:10, validateStatus:()=>true, headers:hdrs });
       r.isUp = true; r.statusCode = res.status; r.statusText = res.statusText;
       r.responseTime = Date.now() - start;
       r.finalUrl = res.request?.res?.responseUrl || res.config?.url || null;
@@ -777,9 +777,10 @@ app.post('/api/analyze', async (req, res) => {
     const contentAnalysis = analyzeContent(html, domain, httpStatus.finalUrl);
 
     // Detect WAF/proxy blocks: 403 with tiny non-HTML body
-    const isWAFBlock = httpStatus.isUp && httpStatus.statusCode === 403 &&
-      html.length < 200 && !/<html/i.test(html) &&
-      /host not allowed|access denied|forbidden|blocked|not authorized/i.test(html);
+    const isWAFBlock = httpStatus.isUp && httpStatus.statusCode === 403 && (
+      html.length === 0 ||
+      (html.length < 200 && !/<html/i.test(html) &&
+        /host not allowed|access denied|forbidden|blocked|not authorized/i.test(html)));
 
     let overallStatus = 'UNKNOWN', statusColor = 'gray';
     if (!dnsResults.hasARecord && !httpStatus.isUp) { overallStatus = 'DEAD'; statusColor = 'red'; }
@@ -793,7 +794,7 @@ app.post('/api/analyze', async (req, res) => {
     else if (contentAnalysis.verdict === 'DEFAULT_PAGE') { overallStatus = 'DEFAULT_PAGE'; statusColor = 'orange'; }
     else if (contentAnalysis.verdict === 'SUSPENDED') { overallStatus = 'SUSPENDED'; statusColor = 'red'; }
     else if (contentAnalysis.verdict === 'POLITICAL_CAMPAIGN') { overallStatus = 'POLITICAL_CAMPAIGN'; statusColor = 'blue'; }
-    else if (httpStatus.statusCode >= 200 && httpStatus.statusCode < 400 && contentAnalysis.verdict === 'VALID') { overallStatus = 'ACTIVE'; statusColor = 'green'; }
+    else if (contentAnalysis.verdict === 'VALID' && ((httpStatus.statusCode >= 200 && httpStatus.statusCode < 400) || (httpStatus.statusCode === 403 && contentAnalysis.details.wordCount >= 100))) { overallStatus = 'ACTIVE'; statusColor = 'green'; }
     else { overallStatus = 'ISSUES'; statusColor = 'yellow'; }
 
     const genuinelyValid = ['ACTIVE','POLITICAL_CAMPAIGN'].includes(overallStatus);
@@ -836,9 +837,10 @@ app.post('/api/analyze/bulk', async (req, res) => {
       const contentAnalysis = analyzeContent(html, domain, httpStatus.finalUrl);
 
       // Detect WAF/proxy blocks
-      const isWAFBlock = httpStatus.isUp && httpStatus.statusCode === 403 &&
-        html.length < 200 && !/<html/i.test(html) &&
-        /host not allowed|access denied|forbidden|blocked|not authorized/i.test(html);
+      const isWAFBlock = httpStatus.isUp && httpStatus.statusCode === 403 && (
+        html.length === 0 ||
+        (html.length < 200 && !/<html/i.test(html) &&
+          /host not allowed|access denied|forbidden|blocked|not authorized/i.test(html)));
 
       let overallStatus = 'UNKNOWN';
       if (!dnsResults.hasARecord && !httpStatus.isUp) overallStatus = 'DEAD';
@@ -852,7 +854,7 @@ app.post('/api/analyze/bulk', async (req, res) => {
       else if (contentAnalysis.verdict === 'DEFAULT_PAGE') overallStatus = 'DEFAULT_PAGE';
       else if (contentAnalysis.verdict === 'SUSPENDED') overallStatus = 'SUSPENDED';
       else if (contentAnalysis.verdict === 'POLITICAL_CAMPAIGN') overallStatus = 'POLITICAL_CAMPAIGN';
-      else if (httpStatus.statusCode >= 200 && httpStatus.statusCode < 400 && contentAnalysis.verdict === 'VALID') overallStatus = 'ACTIVE';
+      else if (contentAnalysis.verdict === 'VALID' && ((httpStatus.statusCode >= 200 && httpStatus.statusCode < 400) || (httpStatus.statusCode === 403 && contentAnalysis.details.wordCount >= 100))) overallStatus = 'ACTIVE';
       else overallStatus = 'ISSUES';
 
       console.log(`  [OK] ${domain} -> ${overallStatus}`);
@@ -2785,14 +2787,15 @@ app.post('/api/extract-business', async (req, res) => {
     const contentAnalysis = analyzeContent(html, domain, httpStatus.finalUrl);
     let websiteStatus = 'UNKNOWN';
 
-    // Detect WAF/proxy blocks: 403 with tiny non-HTML body like "Host not allowed", "Access Denied"
-    const isWAFBlock = httpStatus.isUp && httpStatus.statusCode === 403 &&
-      html.length < 200 && !/<html/i.test(html) &&
-      /host not allowed|access denied|forbidden|blocked|not authorized/i.test(html);
+    // Detect WAF/proxy blocks: 403 with empty or tiny non-HTML body like "Host not allowed", "Access Denied"
+    const isWAFBlock = httpStatus.isUp && httpStatus.statusCode === 403 && (
+      html.length === 0 ||
+      (html.length < 200 && !/<html/i.test(html) &&
+        /host not allowed|access denied|forbidden|blocked|not authorized/i.test(html)));
 
     if (!dnsResults.hasARecord && !httpStatus.isUp) websiteStatus = 'DEAD';
     else if (!httpStatus.isUp) websiteStatus = 'DOWN';
-    else if (isWAFBlock) websiteStatus = 'BLOCKED';
+    else if (isWAFBlock || contentAnalysis.verdict === 'BLOCKED') websiteStatus = 'BLOCKED';
     else if (contentAnalysis.verdict === 'CROSS_DOMAIN_REDIRECT') websiteStatus = 'CROSS_DOMAIN_REDIRECT';
     else if (contentAnalysis.verdict === 'PARKED') websiteStatus = 'PARKED';
     else if (contentAnalysis.verdict === 'COMING_SOON') websiteStatus = 'COMING_SOON';
@@ -2801,7 +2804,7 @@ app.post('/api/extract-business', async (req, res) => {
     else if (contentAnalysis.verdict === 'DEFAULT_PAGE') websiteStatus = 'DEFAULT_PAGE';
     else if (contentAnalysis.verdict === 'SUSPENDED') websiteStatus = 'SUSPENDED';
     else if (contentAnalysis.verdict === 'POLITICAL_CAMPAIGN') websiteStatus = 'POLITICAL_CAMPAIGN';
-    else if (httpStatus.statusCode >= 200 && httpStatus.statusCode < 400 && contentAnalysis.verdict === 'VALID') websiteStatus = 'ACTIVE';
+    else if (contentAnalysis.verdict === 'VALID' && ((httpStatus.statusCode >= 200 && httpStatus.statusCode < 400) || (httpStatus.statusCode === 403 && contentAnalysis.details.wordCount >= 100))) websiteStatus = 'ACTIVE';
     else websiteStatus = 'ISSUES';
 
     // If site is dead/down/suspended/blocked/no content, skip business extraction
