@@ -1,8 +1,8 @@
 {
   "name": "website-intelligence-backend",
-  "version": "2.0.0",
+  "version": "4.0.0",
   "type": "module",
-  "description": "Domain analyzer \u2014 detect parked domains, shell sites, cross-domain redirects, coming soon pages, political campaigns & more.",
+  "description": "Website Intelligence \u2014 DOM-first detection: status, business name, address, phone, email, domain age, social signals.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

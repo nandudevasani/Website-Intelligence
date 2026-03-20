@@ -1,2951 +1,498 @@
+/**
+ * Website Intelligence v4.0 — server.js
+ * Architecture: Less regex, more DOM (Cheerio), Python handles all business extraction.
+ *
+ * Endpoints:
+ *   GET  /api/health
+ *   POST /api/analyze          → status, DNS, SSL, HTTP, domain age
+ *   POST /api/extract-business → business name, address, phone, email, social
+ */
+
 import express from 'express';
 import axios from 'axios';
-import cors from 'cors';
-import https from 'https';
-import dns from 'dns';
-import { URL } from 'url';
+import * as cheerio from 'cheerio';
+import dns from 'dns/promises';
+import tls from 'tls';
+import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
-import * as cheerio from 'cheerio';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3000;
+const PY_CMD = process.env.PYTHON_EXTRACTOR_CMD || 'python3';
 
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+app.use(express.json({ limit: '4mb' }));
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  next();
 });
+app.use(express.static(__dirname));
 
-// === UTILITY FUNCTIONS ===
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// HTML Entity Decoder
-function decodeHTML(str) {
-  if (!str) return str;
-  return str
-    .replace(/&bull;|&#8226;/gi, '')  // strip bullet entities BEFORE numeric decode
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n))
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
-    .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
-    .replace(/&nbsp;/gi, ' ').replace(/&ndash;/gi, '–').replace(/&mdash;/gi, '—')
-    .replace(/&copy;/gi, '©').replace(/&reg;/gi, '®')
-    .replace(/&trade;/gi, '™').replace(/&laquo;/gi, '«').replace(/&raquo;/gi, '»')
-    .replace(/[•·]/g, '')  // also strip literal bullet/middle dot chars
-    .replace(/\s+/g, ' ').trim();
+function normalizeDomain(input = '') {
+  return input.trim().toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/.*$/, '')
+    .replace(/^www\./, '');
 }
 
-const CACHE = new Map();
-const CACHE_TTL = 10 * 60 * 1000;
-
-function cacheSet(key, data) {
-  CACHE.set(key, { data, expires: Date.now() + CACHE_TTL });
-  if (CACHE.size > 500) {
-    const oldest = CACHE.keys().next().value;
-    CACHE.delete(oldest);
-  }
-}
- 
-function normalizeDomain(input) {
-  let d = input.trim().toLowerCase();
-  d = d.replace(/^(https?:\/\/)/, '').replace(/\/.*$/, '').replace(/^www\./, '');
-  return d;
-}
-
-function buildUrl(domain, protocol = 'https') {
-  return `${protocol}://${domain}`;
-}
-
-function extractRootDomain(url) {
+function rootDomain(urlStr) {
   try {
-    let h = url.replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^www\./, '');
-    const p = h.split('.');
-    if (p.length >= 2) return p.slice(-2).join('.');
-    return h;
+    const host = new URL(urlStr).hostname.toLowerCase().replace(/^www\./, '');
+    const parts = host.split('.');
+    return parts.length >= 2 ? parts.slice(-2).join('.') : host;
   } catch { return ''; }
 }
 
-function isBoilerplateName(s) {
-  if (!s) return false;
-  const t = s.trim().toLowerCase();
-  return (
-    /my wordpress blog/i.test(t) ||
-    /just another wordpress site/i.test(t) ||
-    /another wordpress site/i.test(t) ||
-    /^wordpress$/i.test(t) ||
-    /wordpress starter/i.test(t) ||
-    /^(my site|my website|my blog|my home page|website)$/i.test(t) ||
-    /google\s+privacy\s+policy/i.test(t) ||
-    /privacy\s+policy\s+and\s+terms\s+of\s+service/i.test(t) ||
-    /terms\s+of\s+service/i.test(t) ||
-    /protected\s+by\s+recaptcha/i.test(t) ||
-    /this\s+site\s+is\s+protected/i.test(t) ||
-    /coming\s+soon/i.test(t) ||
-    /under\s+construction/i.test(t) ||
-    /\b(for sale|park model|for sale by owner|fsbo|listing)\b/i.test(t) ||
-    /^(home|index|untitled|default|new|new page|page \d+)$/i.test(t) ||
-    /^(hello world|sample page|test page)$/i.test(t) ||
-    /just a moment/i.test(t) ||
-    /checking your browser/i.test(t) ||
-    /attention required/i.test(t) ||
-    /verify you are human/i.test(t) ||
-    /access denied/i.test(t) ||
-    /^(forbidden|not found|error|error \d+|page not found|404|403|500|502|503)$/i.test(t) ||
-    /^default page$/i.test(t)
-  );
+function formatAgeText(days) {
+  if (days === null || days < 0) return null;
+  const y = Math.floor(days / 365);
+  const m = Math.floor((days % 365) / 30);
+  if (y > 0 && m > 0) return `${y}Y ${m}M`;
+  if (y > 0) return `${y}Y`;
+  if (m > 0) return `${m}M`;
+  return '< 1M';
 }
 
-function normalizeExtractedBusinessName(name) {
-  if (!name) return name;
-  let cleaned = name.replace(/\s+/g, ' ').trim();
-  // Collapse exact repeated halves: "Name Name" -> "Name"
-  const words = cleaned.split(' ');
-  if (words.length >= 4 && words.length % 2 === 0) {
-    const half = words.length / 2;
-    if (words.slice(0, half).join(' ').toLowerCase() === words.slice(half).join(' ').toLowerCase()) {
-      cleaned = words.slice(0, half).join(' ');
-    }
-  }
-  cleaned = cleaned.replace(/\((repeat(?:ed)?\s+\w+)\)$/i, '').trim();
-  return cleaned;
-}
+// ─── DNS ─────────────────────────────────────────────────────────────────────
 
-async function extractBusinessWithPython(html, pageUrl) {
-  return new Promise((resolve) => {
-    try {
-      const scriptPath = path.join(__dirname, 'extractor.py');
-      const pythonCmd = process.env.PYTHON_EXTRACTOR_CMD || 'python3';
-      const py = spawn(pythonCmd, [scriptPath], { stdio: ['pipe', 'pipe', 'pipe'] });
-      let settled = false;
-
-      const settle = (value) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(value);
-      };
-
-      let out = '';
-      let err = '';
-      const timer = setTimeout(() => {
-        py.kill('SIGKILL');
-        settle({ ok: false, error: 'Python extractor timed out' });
-      }, 12000);
-
-      py.stdout.on('data', (d) => { out += d.toString(); });
-      py.stderr.on('data', (d) => { err += d.toString(); });
-      py.on('error', (e) => {
-        settle({ ok: false, error: `Python spawn failed (${pythonCmd}): ${e.message}` });
-      });
-
-      py.on('close', (code) => {
-        if (settled) return;
-        if (code !== 0 && !out) {
-          return settle({ ok: false, error: err || `Python exited with code ${code}` });
-        }
-        try {
-          const parsed = JSON.parse(out || '{}');
-          settle(parsed);
-        } catch {
-          settle({ ok: false, error: err || 'Invalid JSON from Python extractor' });
-        }
-      });
-
-      py.stdin.write(JSON.stringify({ html: html || '', page_url: pageUrl || '' }));
-      py.stdin.end();
-    } catch (e) {
-      resolve({ ok: false, error: e.message });
-    }
-  });
-}
-
-// === CDN / PLATFORM DOMAIN WHITELIST ===
-// These are CDN, hosting, and platform domains where finalUrl may land
-// but the site is NOT actually redirecting to a different website.
-const CDN_HOSTING_DOMAINS = [
-  'cdn-website.com',     // Duda / Thryv
-  'cloudfront.net',      // AWS CloudFront
-  'cloudflare.com',      // Cloudflare
-  'workers.dev',         // Cloudflare Workers
-  'pages.dev',           // Cloudflare Pages
-  'netlify.app',         // Netlify
-  'vercel.app',          // Vercel
-  'herokuapp.com',       // Heroku
-  'azurewebsites.net',   // Azure
-  'azureedge.net',       // Azure CDN
-  'amazonaws.com',       // AWS
-  'googleapis.com',      // Google
-  'firebaseapp.com',     // Firebase
-  'web.app',             // Firebase
-  'onrender.com',        // Render
-  'railway.app',         // Railway
-  'fly.dev',             // Fly.io
-  'deno.dev',            // Deno
-  'github.io',           // GitHub Pages
-  'gitlab.io',           // GitLab Pages
-  'bitbucket.io',        // Bitbucket
-  'shopify.com',         // Shopify
-  'myshopify.com',       // Shopify
-  'squarespace.com',     // Squarespace
-  'wixsite.com',         // Wix
-  'weebly.com',          // Weebly
-  'godaddysites.com',    // GoDaddy
-  'wsimg.com',           // GoDaddy CDN
-  'secureserver.net',    // GoDaddy
-  'edgekey.net',         // Akamai
-  'akamaihd.net',        // Akamai
-  'akamaized.net',       // Akamai
-  'fastly.net',          // Fastly
-  'lirp.cdn-website.com',// Duda
-  'dudaone.com',         // Duda
-  'b-cdn.net',           // BunnyCDN
-  'cdninstagram.com',    // Instagram CDN
-  'fbcdn.net',           // Facebook CDN
-  'twimg.com',           // Twitter CDN
-  'gstatic.com'          // Google Static
-];
-
-function isCDNDomain(url) {
-  const root = extractRootDomain(url);
-  const hostname = url.replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
-  return CDN_HOSTING_DOMAINS.some(cdn => root === cdn || hostname.endsWith('.' + cdn) || hostname === cdn);
-}
-
-// === KNOWN WEB APP / LOGIN PAGE PATTERNS ===
-// Major web applications that show login pages or SPAs with no real content
-const KNOWN_WEB_APP_PATTERNS = [
-  { match: /outlook\.live\.com|outlook\.office/i, redirectsTo: 'microsoft.com', name: 'Microsoft Outlook' },
-  { match: /login\.live\.com/i, redirectsTo: 'microsoft.com', name: 'Microsoft Login' },
-  { match: /login\.microsoftonline\.com/i, redirectsTo: 'microsoft.com', name: 'Microsoft Online' },
-  { match: /accounts\.google\.com/i, redirectsTo: 'google.com', name: 'Google Accounts' },
-  { match: /mail\.google\.com/i, redirectsTo: 'google.com', name: 'Gmail' },
-  { match: /login\.yahoo\.com/i, redirectsTo: 'yahoo.com', name: 'Yahoo Login' }
-];
-
-// === DNS ANALYSIS ===
-
-function dnsWithTimeout(promise, ms = 8000) {
-  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('dns-timeout')), ms))]);
-}
-
-async function analyzeDNS(domain) {
-  const r = { hasARecord:false, hasMXRecord:false, hasNSRecord:false, aRecords:[], mxRecords:[], nsRecords:[], cnameRecords:[], txtRecords:[], error:null };
-  try {
-    try { const a = await dnsWithTimeout(dns.promises.resolve4(domain)); r.aRecords = a; r.hasARecord = a.length > 0; } catch {}
-    try { const mx = await dnsWithTimeout(dns.promises.resolveMx(domain)); r.mxRecords = mx.map(x => ({ priority:x.priority, exchange:x.exchange })); r.hasMXRecord = mx.length > 0; } catch {}
-    try { const ns = await dnsWithTimeout(dns.promises.resolveNs(domain)); r.nsRecords = ns; r.hasNSRecord = ns.length > 0; } catch {}
-    try { const cn = await dnsWithTimeout(dns.promises.resolveCname(domain)); r.cnameRecords = cn; } catch {}
-    try { const tx = await dnsWithTimeout(dns.promises.resolveTxt(domain)); r.txtRecords = tx.map(x => x.join('')); } catch {}
-  } catch (e) { r.error = e.message; }
+async function checkDns(domain) {
+  const r = { hasARecord: false, aRecords: [], mxRecords: [], nsRecords: [] };
+  await Promise.allSettled([
+    dns.resolve4(domain).then(a  => { r.aRecords = a; r.hasARecord = a.length > 0; }),
+    dns.resolveMx(domain).then(mx => { r.mxRecords = mx; }),
+    dns.resolveNs(domain).then(ns => { r.nsRecords = ns; }),
+  ]);
   return r;
 }
 
-// === SSL ANALYSIS ===
+// ─── SSL ─────────────────────────────────────────────────────────────────────
 
-function analyzeSSL(domain) {
-  return new Promise((resolve) => {
-    const r = { valid:false, issuer:null, subject:null, validFrom:null, validTo:null, daysRemaining:null, protocol:null, error:null };
+async function checkSsl(domain) {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve({ valid: false, error: 'timeout' }), 7000);
     try {
-      const req = https.request({ hostname:domain, port:443, method:'HEAD', timeout:10000, rejectUnauthorized:false }, (res) => {
-        const c = res.socket.getPeerCertificate();
-        if (c && Object.keys(c).length > 0) {
-          r.valid = res.socket.authorized;
-          r.issuer = c.issuer ? (c.issuer.O || c.issuer.CN || 'Unknown') : 'Unknown';
-          r.subject = c.subject ? (c.subject.CN || 'Unknown') : 'Unknown';
-          r.validFrom = c.valid_from || null; r.validTo = c.valid_to || null;
-          if (c.valid_to) r.daysRemaining = Math.floor((new Date(c.valid_to) - new Date()) / 86400000);
-          r.protocol = res.socket.getProtocol ? res.socket.getProtocol() : null;
-        }
-        resolve(r);
+      const sock = tls.connect(443, domain, { servername: domain, rejectUnauthorized: false }, () => {
+        clearTimeout(timer);
+        const cert = sock.getPeerCertificate();
+        sock.destroy();
+        if (!cert?.subject) return resolve({ valid: false });
+        const exp = new Date(cert.valid_to);
+        const days = Math.floor((exp - Date.now()) / 86400000);
+        resolve({
+          valid: days > 0,
+          issuer: cert.issuer?.O || cert.issuer?.CN || null,
+          daysRemaining: days,
+          protocol: sock.getProtocol(),
+          expiresAt: exp.toISOString(),
+        });
       });
-      req.on('error', (e) => { r.error = e.message; resolve(r); });
-      req.on('timeout', () => { r.error = 'Timed out'; req.destroy(); resolve(r); });
-      req.end();
-    } catch (e) { r.error = e.message; resolve(r); }
+      sock.on('error', () => { clearTimeout(timer); resolve({ valid: false }); });
+    } catch { clearTimeout(timer); resolve({ valid: false }); }
   });
 }
 
-// === HTTP STATUS ANALYSIS (with retry) ===
+// ─── HTTP ─────────────────────────────────────────────────────────────────────
 
-async function analyzeHTTPStatus(domain, retries = 1) {
-  const r = { isUp:false, statusCode:null, statusText:null, responseTime:null, finalUrl:null, redirectChain:[], headers:{}, error:null };
-  const start = Date.now();
-  const hdrs = {
-    'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language':'en-US,en;q=0.9',
-    'Accept-Encoding':'gzip, deflate, br',
-    'Cache-Control':'no-cache',
-    'Connection':'keep-alive',
-    'Upgrade-Insecure-Requests':'1'
-  };
-
-  for (let attempt = 0; attempt <= retries; attempt++) {
+async function checkHttp(url) {
+  // Accept full URL or bare domain
+  const urls = url.startsWith('http') ? [url] : [`https://${url}`, `http://${url}`];
+  for (const u of urls) {
     try {
-      if (attempt > 0) await new Promise(ok => setTimeout(ok, 1000 * attempt)); // backoff
-      const res = await axios.get(buildUrl(domain), { timeout:8000, maxRedirects:10, validateStatus:()=>true, headers:hdrs });
-      r.isUp = true; r.statusCode = res.status; r.statusText = res.statusText;
-      r.responseTime = Date.now() - start;
-      r.finalUrl = res.request?.res?.responseUrl || res.config?.url || null;
-      r.headers = { server:res.headers['server']||null, poweredBy:res.headers['x-powered-by']||null, contentType:res.headers['content-type']||null };
-      return { result:r, html:typeof res.data === 'string' ? res.data : '' };
-    } catch (err) {
-      r.responseTime = Date.now() - start;
-      if (attempt < retries) continue; // retry
-      // Final attempt: try HTTP fallback
-      try {
-        const fb = await axios.get(buildUrl(domain,'http'), { timeout:10000, maxRedirects:10, validateStatus:()=>true, headers:{'User-Agent':hdrs['User-Agent'],'Accept':hdrs['Accept']} });
-        r.isUp = true; r.statusCode = fb.status; r.statusText = fb.statusText;
-        r.finalUrl = fb.request?.res?.responseUrl || fb.config?.url || null;
-        return { result:r, html:typeof fb.data === 'string' ? fb.data : '' };
-      } catch (e2) { r.error = err.code || err.message; return { result:r, html:'' }; }
-    }
-  }
-  return { result:r, html:'' };
-}
-
-// ═══════════════════════════════════════════════════════════════
-// CONTENT INTELLIGENCE ENGINE v2.2
-// ═══════════════════════════════════════════════════════════════
-
-function analyzeContent(html, domain, finalUrl) {
-  const analysis = {
-    verdict:'VALID', confidence:0, reasons:[], flags:[], redirectInfo:null,
-    details:{ title:null, metaDescription:null, hasBody:false, bodyTextLength:0, wordCount:0, uniqueWordCount:0, headings:[], links:{internal:0,external:0}, images:0, forms:0, scripts:0, iframes:0 }
-  };
-
-  // ════════════════════════════════════════════════════════════
-  // PRE-CHECK 1: Known Web App / Login Page Detection
-  // Catches: outlook.live.com → Microsoft, mail.google.com → Google
-  // These domains are web apps that show login/SPA pages, not real websites
-  // ════════════════════════════════════════════════════════════
-  const fullDomainStr = domain + (finalUrl ? ' ' + finalUrl : '');
-  for (const app of KNOWN_WEB_APP_PATTERNS) {
-    if (app.match.test(fullDomainStr)) {
-      analysis.verdict = 'CROSS_DOMAIN_REDIRECT';
-      analysis.confidence = 90;
-      analysis.reasons.push('Domain is a web application login portal that redirects to ' + app.redirectsTo);
-      analysis.flags.push('CROSS_DOMAIN_REDIRECT', 'WEB_APP_LOGIN');
-      analysis.redirectInfo = { source:domain, target:app.redirectsTo, targetDomain:app.redirectsTo, method:'Web Application Redirect' };
-      return analysis;
-    }
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // PRE-CHECK 2: Cross-Domain Redirect via HTTP
-  // Catches real cross-domain redirects BUT skips CDN/hosting domains
-  // ════════════════════════════════════════════════════════════
-  if (finalUrl) {
-    const origRoot = extractRootDomain(domain);
-    const finalRoot = extractRootDomain(finalUrl);
-    if (origRoot && finalRoot && origRoot !== finalRoot && !isCDNDomain(finalUrl)) {
-      analysis.verdict = 'CROSS_DOMAIN_REDIRECT'; analysis.confidence = 92;
-      analysis.reasons.push('Website redirects to a different domain: ' + finalUrl);
-      analysis.flags.push('CROSS_DOMAIN_REDIRECT');
-      analysis.redirectInfo = { source:domain, target:finalUrl, targetDomain:finalRoot, method:'HTTP 3xx' };
-
-      const spamPatterns = [/\/articles\/?$/i, /\/blog\/?$/i, /\/news\/?$/i, /dot-[a-z]+\.org/i, /searchhounds/i, /dot-guide/i, /dot-mom/i, /dot-consulting/i];
-      if (spamPatterns.some(p => p.test(finalUrl))) {
-        analysis.confidence = 97; analysis.flags.push('SUSPICIOUS_REDIRECT_TARGET');
-        analysis.reasons.push('Redirect target matches known SEO spam / link farm patterns');
-      }
-      return analysis;
-    }
-  }
-
-  if (!html || html.trim().length === 0) {
-    analysis.verdict = 'NO_CONTENT'; analysis.confidence = 95;
-    analysis.reasons.push('Empty or no HTML response received');
-    return analysis;
-  }
-
-  // -- Extract basic details --
-  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  analysis.details.title = titleMatch ? titleMatch[1].trim().replace(/\s+/g, ' ') : null;
-
-  const metaDescMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([\s\S]*?)["']/i);
-  analysis.details.metaDescription = metaDescMatch ? metaDescMatch[1].trim() : null;
-
-  let bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-  let bodyText = bodyMatch ? bodyMatch[1] : html;
-  bodyText = bodyText.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<noscript[\s\S]*?<\/noscript>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/&#\d+;/gi, ' ').replace(/\s+/g, ' ').trim();
-
-  analysis.details.hasBody = bodyText.length > 0;
-  analysis.details.bodyTextLength = bodyText.length;
-  const words = bodyText.split(/\s+/).filter(w => w.length > 1);
-  analysis.details.wordCount = words.length;
-  const uniqueWords = new Set(words.map(w => w.toLowerCase()));
-  analysis.details.uniqueWordCount = uniqueWords.size;
-  const repetitionRatio = analysis.details.wordCount > 0 ? analysis.details.uniqueWordCount / analysis.details.wordCount : 0;
-
-  const headingMatches = html.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi) || [];
-  analysis.details.headings = headingMatches.map(h => h.replace(/<[^>]+>/g, '').trim()).filter(h => h.length > 0);
-  analysis.details.images = (html.match(/<img[\s ]/gi) || []).length;
-  analysis.details.forms = (html.match(/<form[\s ]/gi) || []).length;
-  analysis.details.scripts = (html.match(/<script[\s>]/gi) || []).length;
-  analysis.details.iframes = (html.match(/<iframe[\s ]/gi) || []).length;
-
-  const linkMatches = html.match(/<a[^>]+href=["']([^"']+)["']/gi) || [];
-  let internalLinks = 0, externalLinks = 0;
-  linkMatches.forEach(link => {
-    const hm = link.match(/href=["']([^"']+)["']/i);
-    if (hm) {
-      const href = hm[1];
-      if (href.includes(domain) || href.startsWith('/') || href.startsWith('#') || href.startsWith('.')) internalLinks++;
-      else if (href.startsWith('http')) externalLinks++;
-    }
-  });
-  analysis.details.links.internal = internalLinks;
-  analysis.details.links.external = externalLinks;
-
-  // How many REAL internal navigation links (not just / or #)?
-  const realNavLinks = linkMatches.filter(link => {
-    const hm = link.match(/href=["']([^"']+)["']/i);
-    if (!hm) return false;
-    const href = hm[1];
-    return (href.startsWith('/') && href.length > 1 && href !== '/#') || href.includes(domain);
-  }).length;
-
-  // ════════════════════════════════════════════════════════════
-  // DETECTION 0: Cloudflare / Bot Challenge Page
-  // ════════════════════════════════════════════════════════════
-
-  const cfChallengeSignals = [
-    /just a moment/i,
-    /checking your browser/i,
-    /verify you are human/i,
-    /enable javascript and cookies/i,
-    /cf-browser-verification/i,
-    /challenge-platform/i,
-    /__cf_bm/i,
-    /managed by cloudflare/i,
-    /ray id:/i,
-    /cloudflare to restrict access/i,
-    /attention required/i,
-  ];
-  const cfHits = cfChallengeSignals.filter(p => p.test(html)).length;
-  if (cfHits >= 2 && analysis.details.wordCount < 200) {
-    analysis.verdict = 'BLOCKED'; analysis.confidence = 90;
-    analysis.reasons.push('Website returned a Cloudflare bot-challenge page instead of real content');
-    analysis.flags.push('BLOCKED', 'CLOUDFLARE_CHALLENGE');
-    return analysis;
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // DETECTION 1: Cross-Domain Redirect (JS / Meta Refresh)
-  // ════════════════════════════════════════════════════════════
-
-  let jsRedirectTarget = null;
-  const jsRedirectPatterns = [
-    /window\.location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i,
-    /window\.location\.replace\s*\(\s*["']([^"']+)["']\s*\)/i,
-    /window\.location\.assign\s*\(\s*["']([^"']+)["']\s*\)/i,
-    /document\.location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i,
-    /location\.href\s*=\s*["']([^"']+)["']/i,
-    /location\.replace\s*\(\s*["']([^"']+)["']\s*\)/i,
-    /top\.location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i,
-    /self\.location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i,
-    /setTimeout\s*\(\s*(?:function\s*\(\)\s*\{)?\s*(?:window\.)?location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i
-  ];
-
-  for (const p of jsRedirectPatterns) {
-    const m = html.match(p);
-    if (m && m[1] && (m[1].startsWith('http') || m[1].startsWith('//'))) { jsRedirectTarget = m[1]; break; }
-  }
-
-  const metaRefreshMatch = html.match(/<meta[^>]*http-equiv=["']refresh["'][^>]*content=["']\d+;\s*url=([^"']+)["']/i);
-  if (!jsRedirectTarget && metaRefreshMatch) jsRedirectTarget = metaRefreshMatch[1];
-
-  if (jsRedirectTarget) {
-    const targetRoot = extractRootDomain(jsRedirectTarget);
-    const sourceRoot = extractRootDomain(domain);
-    if (targetRoot && sourceRoot && targetRoot !== sourceRoot && !isCDNDomain(jsRedirectTarget)) {
-      analysis.verdict = 'CROSS_DOMAIN_REDIRECT'; analysis.confidence = 92;
-      analysis.reasons.push('Website redirects to an unrelated domain: ' + jsRedirectTarget);
-      analysis.flags.push('CROSS_DOMAIN_REDIRECT');
-      analysis.redirectInfo = { source:domain, target:jsRedirectTarget, targetDomain:targetRoot, method: metaRefreshMatch ? 'Meta Refresh' : 'JavaScript' };
-
-      const spamPatterns = [/\/articles\/?$/i, /\/blog\/?$/i, /\/news\/?$/i, /dot-[a-z]+\.org/i, /searchhounds/i, /dot-guide/i, /dot-mom/i, /dot-consulting/i];
-      if (spamPatterns.some(p => p.test(jsRedirectTarget))) {
-        analysis.confidence = 97; analysis.flags.push('SUSPICIOUS_REDIRECT_TARGET');
-        analysis.reasons.push('Redirect target matches known SEO spam / link farm patterns');
-      }
-      return analysis;
-    }
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // DETECTION 2: Website Builder Shell Sites (WIDENED in v2.2)
-  // GoDaddy one-page templates: brand + tagline + contact form
-  // ════════════════════════════════════════════════════════════
-
-  // Shell page signals (common across GoDaddy templates)
-  const shellSignals = {
-    dropUsLine: /drop us a line/i.test(html),
-    emailList: /sign up for our email list/i.test(html),
-    recaptcha: /this site is protected by recaptcha/i.test(html),
-    cookieBanner: /this website uses cookies[\s\S]{0,300}accept/i.test(html),
-    poweredBy: /powered by/i.test(html),
-    contactUs: /contact\s+us\s*---/i.test(html),  // GoDaddy "Contact Us ---" section divider
-    googlePolicies: /google\s+privacy\s+policy[\s\S]{0,50}terms\s+of\s+service/i.test(html),
-    allRightsReserved: /all\s+rights\s+reserved/i.test(html)
-  };
-
-  const shellSignalCount = Object.values(shellSignals).filter(Boolean).length;
-
-  // Builder platform CDN indicators
-  const builderIndicators = [/wsimg\.com/i, /godaddy/i, /websites\.godaddy\.com/i, /secureserver\.net/i, /cdn-website\.com/i, /wix\.com/i, /squarespace\.com/i, /weebly\.com/i];
-  const hasBuilderIndicator = builderIndicators.some(p => p.test(html));
-
-  // Check title repetition in headings
-  const titleText = (analysis.details.title || '').toLowerCase().trim();
-  let titleRepeatCount = 0;
- if (titleText.length > 2) {
-    analysis.details.headings.forEach(h => {
-      const ht = h.toLowerCase().trim();
-      if (ht.includes(titleText) || titleText.includes(ht)) titleRepeatCount++;
-    });
-  }
-
-  // SHELL SITE detection — multiple paths to catch all variants
-  const isShellSite = (
-    // Path A: 3+ shell signals + word count under 250
-    (shellSignalCount >= 3 && analysis.details.wordCount < 250) ||
-    // Path B: 2+ shell signals + title repeated + word count under 300
-    (shellSignalCount >= 2 && titleRepeatCount >= 2 && analysis.details.wordCount < 300) ||
-    // Path C: Builder CDN + 2+ shell signals + low unique content
-    (hasBuilderIndicator && shellSignalCount >= 2 && analysis.details.uniqueWordCount < 80) ||
-    // Path D: Very repetitive + shell signals + low words
-    (repetitionRatio < 0.30 && shellSignalCount >= 2 && analysis.details.wordCount < 250) ||
-    // Path E: "Drop us a line" + reCAPTCHA + under 250 words (very specific GoDaddy pattern)
-    (shellSignals.dropUsLine && shellSignals.recaptcha && analysis.details.wordCount < 250) ||
-    // Path F: Cookie banner + powered by + contact section + very few nav links + under 300 words
-    (shellSignals.cookieBanner && shellSignals.poweredBy && shellSignalCount >= 3 && realNavLinks <= 2 && analysis.details.wordCount < 300)
-  );
-
-  if (isShellSite) {
-    // ── Real business override ──
-    // Even a minimal real business leaves traces: phone, email, or WhatsApp.
-    // If ANY of these exist, the site belongs to a real business — not a true shell.
-    const hasPhone   = /(?:tel:|href=["']tel:|\b(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b)/i.test(html);
-    const hasEmail   = /mailto:[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/i.test(html);
-    const hasWhatsApp = /wa\.me\/|whatsapp\.com\/send|api\.whatsapp\.com|whatsapp:/i.test(html);
-    const realBusinessSignals = [hasPhone, hasEmail, hasWhatsApp].filter(Boolean);
-
-    // Filter out template-default signals (GoDaddy filler emails, placeholder phones)
-    const hasFillerEmail = /mailto:(?:filler|noreply|no-reply)@/i.test(html);
-    const cleanSignalCount = realBusinessSignals.length - (hasFillerEmail && hasEmail ? 1 : 0);
-
-    if (cleanSignalCount >= 2) {
-      // Has 2+ genuine business signals — real business on a template, mark VALID
-      analysis.verdict = 'VALID';
-      analysis.confidence = Math.min(40 + realBusinessSignals.length * 15, 80);
-      analysis.reasons.push('Template-style site but has real business contact signals (' +
-        [hasPhone && 'phone', hasEmail && 'email', hasWhatsApp && 'WhatsApp'].filter(Boolean).join(', ') + ')');
-      analysis.flags.push('MINIMAL_SITE', 'BUILDER_DETECTED');
-      if (hasWhatsApp) analysis.flags.push('HAS_WHATSAPP');
-      if (hasPhone)    analysis.flags.push('HAS_PHONE');
-      if (hasEmail)    analysis.flags.push('HAS_EMAIL');
-      return analysis;
-    }
-
-    // No real business signals — confirmed shell
-    analysis.verdict = 'SHELL_SITE';
-    analysis.confidence = Math.min(55 + shellSignalCount * 7 + (titleRepeatCount >= 2 ? 10 : 0) + (hasBuilderIndicator ? 10 : 0) + (shellSignals.dropUsLine ? 5 : 0), 95);
-    analysis.reasons.push('Website is a template shell — no phone, email, or WhatsApp signals found.');
-    analysis.flags.push('SHELL_SITE');
-    if (hasBuilderIndicator) analysis.flags.push('BUILDER_DETECTED');
-    return analysis;
-  }
-
-  // Other builders (Wix blank, Squarespace default, WordPress default)
-  const otherBuilderShells = [
-    { name:'Wix', indicators:[/wix\.com/i, /wixsite\.com/i, /parastorage\.com/i], signals:[/this is a blank site/i, /welcome to your site/i, /start editing/i] },
-    { name:'Squarespace', indicators:[/squarespace\.com/i, /sqsp\.net/i], signals:[/it all begins with an idea/i] },
-    { name:'WordPress', indicators:[/wordpress\.com/i], signals:[/just another wordpress site/i, /hello world/i, /sample page/i] }
-  ];
-
-  for (const b of otherBuilderShells) {
-    const hasInd = b.indicators.some(p => p.test(html));
-    const sigHits = b.signals.filter(p => p.test(html)).length;
-    if (hasInd && sigHits >= 1 && analysis.details.uniqueWordCount < 60) {
-      analysis.verdict = 'SHELL_SITE'; analysis.confidence = 85;
-      analysis.reasons.push(b.name + ' template shell with no meaningful content.');
-      analysis.flags.push('SHELL_SITE', 'BUILDER_' + b.name.toUpperCase()); return analysis;
-    }
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // DETECTION 3: Parked Domain / For Sale
-  // ════════════════════════════════════════════════════════════
-
-  const parkedPatterns = [
-    // High-confidence — unambiguous parked/for-sale language
-    /this domain is (for sale|parked|available)/i,
-    /buy this domain/i,
-    /domain (is )?parked/i,
-    /parked (by|at|with|domain)/i,
-    /this (webpage|page|site|website) is parked/i,
-    /domain (name )?for sale/i,
-    /purchase this domain/i,
-    /make (an )?offer (on|for) this domain/i,
-    /hugedomains|sedo\.com|dan\.com|afternic|godaddy\s*auctions/i,
-    /sedoparking/i,
-    /parkingcrew/i,
-    /domainmarket\.com/i,
-    // Tightened: must say "this domain is for sale" not "this plan is for sale"
-    /this\s+domain\s+is\s+for\s+sale/i,
-    /inquire about (this|purchasing)\s+this\s+domain/i,
-    // Tightened: "premium domain" only when preceded by parked-page context words
-    /(?:buy|purchase|acquire|own)\s+(?:this\s+)?(?:premium\s+)?domain/i,
-    // Tightened: "get this domain" only as a standalone CTA, not mid-sentence
-    /^get this domain[\s!.]|[^a-z]get this domain[\s!.]/i,
-    // Lower-confidence — need a partner signal
-    /sponsored\s+listings/i,
-    /related\s+searches/i,
-  ];
-
-  let parkedScore = 0;
-  parkedPatterns.forEach(p => { if (p.test(html)) parkedScore += 20; });
-  // Require 2+ signals (score >= 40) to avoid false positives on legit sites
-  // that happen to mention "related" or "sponsored" in their own content
-  if (parkedScore >= 40) {
-    analysis.verdict = 'PARKED'; analysis.confidence = Math.min(parkedScore, 95);
-    analysis.reasons.push('Domain appears to be parked or for sale'); analysis.flags.push('PARKED'); return analysis;
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // DETECTION 4: Coming Soon / Under Construction
-  // ════════════════════════════════════════════════════════════
-
-  const comingSoonPatterns = [
-    /coming\s+soon/i, /launching\s+soon/i, /under\s+construction/i,
-    /we['\u2019]?re\s+(building|launching|coming)/i, /site\s+(is\s+)?(under\s+construction|being\s+built|coming\s+soon)/i,
-    /stay\s+tuned/i, /something\s+(big|great|new|exciting|amazing)\s+is\s+(coming|on\s+the\s+way|brewing)/i,
-    /we['\u2019]?ll\s+be\s+(back|live|launching|ready)\s+soon/i, /watch\s+this\s+space/i,
-    /new\s+website\s+(is\s+)?(coming|under)/i, /opening\s+soon/i, /check\s+back\s+(soon|later)/i,
-    /almost\s+(here|ready|there|done)/i, /notify\s+me\s+when/i, /get\s+notified/i,
-    /work\s+in\s+progress/i, /pardon\s+our\s+(dust|mess)/i, /exciting\s+things\s+(are\s+)?coming/i
-  ];
-
-  let csScore = 0;
-  comingSoonPatterns.forEach(p => { if (p.test(html)) csScore += 15; });
-  if (csScore > 0 && analysis.details.wordCount < 100) csScore += 20;
-  if (csScore > 0 && /countdown|timer|days.*hours.*min/i.test(html)) csScore += 15;
-
-  if (csScore > 15) {
-    analysis.verdict = 'COMING_SOON'; analysis.confidence = Math.min(csScore, 95);
-    analysis.reasons.push('Website appears to be a coming soon / under construction page'); analysis.flags.push('COMING_SOON'); return analysis;
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // DETECTION 5: Default Server Page
-  // ════════════════════════════════════════════════════════════
-
-  const defaultPagePatterns = [
-    /default\s+(web\s+)?page/i, /this\s+is\s+(the|a)\s+default/i, /web\s+server\s+(is\s+)?working/i,
-    /apache.*default\s+page/i, /welcome\s+to\s+nginx/i, /iis\s+windows\s+server/i,
-    /test\s+page.*apache/i, /congratulations.*successfully\s+installed/i, /placeholder\s+page/i,
-    /website\s+is\s+(almost|not\s+yet)\s+ready/i
-  ];
-
-  // "It works!" is the classic Apache default page — but ONLY match when page has very few words
-  // Real business sites say "how it works" all the time, so we need the word count guard
-  const hasItWorks = /it\s+works/i.test(html) && analysis.details.wordCount < 50;
-
-  if ((defaultPagePatterns.some(p => p.test(html)) && analysis.details.wordCount < 100) || hasItWorks) {
-    analysis.verdict = 'DEFAULT_PAGE'; analysis.confidence = 85;
-    analysis.reasons.push('Website shows a default server/hosting page'); analysis.flags.push('DEFAULT_PAGE'); return analysis;
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // DETECTION 6: Suspended
-  // ════════════════════════════════════════════════════════════
-
-  const suspendedPatterns = [
-    /account\s+(has\s+been\s+)?suspended/i, /this\s+(site|account|website)\s+(has\s+been|is)\s+suspended/i,
-    /website\s+suspended/i, /hosting\s+account\s+suspended/i, /bandwidth\s+(limit\s+)?exceeded/i,
-    /account\s+deactivated/i, /access\s+to\s+this\s+site\s+has\s+been\s+disabled/i
-  ];
-
-  if (suspendedPatterns.some(p => p.test(html))) {
-    analysis.verdict = 'SUSPENDED'; analysis.confidence = 90;
-    analysis.reasons.push('Website account appears to be suspended'); analysis.flags.push('SUSPENDED'); return analysis;
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // DETECTION 7: No Meaningful Content
-  // ════════════════════════════════════════════════════════════
-
-  // Before flagging NO_CONTENT, check if this is a JS SPA (React/Vue/Angular)
-  // SPAs return shell HTML with an empty root div — all content loads via JS
-  const isSPA = (
-    /<div[^>]+id=["'](?:root|app|main|__next|__nuxt|vue-app)["']/i.test(html) ||
-    /data-reactroot|ng-version|data-server-rendered|__NEXT_DATA__|__NUXT__/i.test(html) ||
-    /<noscript[^>]*>[\s\S]{20,}<\/noscript>/i.test(html)  // noscript fallback = SPA
-  );
-
-  if (analysis.details.wordCount < 10) {
-    if (isSPA) {
-      // SPA detected — site is active but JS-rendered, we can't read the content
-      analysis.verdict = 'VALID'; analysis.confidence = 55;
-      analysis.reasons.push('JavaScript single-page application — content loads dynamically (React/Vue/Angular)');
-      analysis.flags.push('SPA_DETECTED');
-      return analysis;
-    }
-    analysis.verdict = 'NO_CONTENT'; analysis.confidence = 92;
-    analysis.reasons.push('Page has virtually no text content (fewer than 10 words)'); return analysis;
-  }
-  if (analysis.details.wordCount < 30 && analysis.details.headings.length === 0 && analysis.details.images === 0) {
-    analysis.verdict = 'NO_CONTENT'; analysis.confidence = 80;
-    analysis.reasons.push('Page has minimal content with no headings or images'); return analysis;
-  }
-  if (analysis.details.wordCount > 20 && repetitionRatio < 0.25) {
-    analysis.verdict = 'NO_CONTENT'; analysis.confidence = 82;
-    analysis.reasons.push('Page content is extremely repetitive — likely a template placeholder'); analysis.flags.push('REPETITIVE_CONTENT'); return analysis;
-  }
-  if (analysis.details.wordCount > 30 && analysis.details.uniqueWordCount < 25) {
-    analysis.verdict = 'NO_CONTENT'; analysis.confidence = 78;
-    analysis.reasons.push('Page has very few unique words — likely placeholder content'); analysis.flags.push('REPETITIVE_CONTENT'); return analysis;
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // DETECTION 8: Political Campaign Site (strict)
-  // ════════════════════════════════════════════════════════════
-
-  const strongPoliticalPatterns = [
-    /paid\s+for\s+by/i, /authorized\s+by\s+[\w\s]+committee/i,
-    /donate\s+to\s+(our|the|my)\s+campaign/i, /find\s+a\s+(voting|polling)\s+location/i,
-    /registered\s+to\s+vote/i, /political\s+committee/i, /political\s+action\s+committee/i,
-    /vote\s+(for|on)\s+(may|november|tuesday|monday|march|april|june|july|august|september|october|december|\d)/i
-  ];
-
-  const mediumPoliticalPatterns = [
-    /running\s+for\s+(office|mayor|governor|council|commissioner|congress|senate|board|judge|sheriff|attorney)/i,
-    /county\s+commissioner/i, /campaign\s+(team|headquarters|office|donation|contribution)/i,
-    /join\s+(my|our|the)\s+campaign/i, /your\s+vote\s+(matters|counts)/i,
-    /on\s+the\s+ballot/i, /election\s+day/i, /primary\s+election/i, /general\s+election/i
-  ];
-
-  const politicalDomainPatterns = [/^vote\d*[a-z]/i, /^elect[a-z]/i];
-
-  let strongHits = strongPoliticalPatterns.filter(p => p.test(html)).length;
-  let mediumHits = mediumPoliticalPatterns.filter(p => p.test(html)).length;
-  let domainHits = politicalDomainPatterns.filter(p => p.test(domain)).length;
-
-  const isPolitical = (strongHits >= 1 && (mediumHits >= 1 || domainHits >= 1)) || (mediumHits >= 2 && domainHits >= 1) || (strongHits >= 2);
-
-  if (isPolitical) {
-    analysis.verdict = 'POLITICAL_CAMPAIGN';
-    analysis.confidence = Math.min(20 + (analysis.details.wordCount > 100 ? 20 : 0) + (analysis.details.wordCount > 500 ? 15 : 0) + (analysis.details.headings.length > 2 ? 10 : 0) + (analysis.details.images > 0 ? 10 : 0) + (analysis.details.links.internal > 3 ? 10 : 0) + (analysis.details.metaDescription ? 10 : 0), 98);
-    analysis.reasons.push('Website is a political campaign site with election-related content');
-    analysis.flags.push('POLITICAL_CAMPAIGN');
-    if (strongHits > 0) analysis.flags.push('HAS_FEC_DISCLOSURE');
-    return analysis;
-  }
-
-  // ════════════════════════════════════════════════════════════
-  // FINAL: VALID
-  // ════════════════════════════════════════════════════════════
-
-  analysis.verdict = 'VALID';
-  analysis.confidence = Math.min(20 + (analysis.details.wordCount > 100 ? 20 : 0) + (analysis.details.wordCount > 500 ? 15 : 0) + (analysis.details.headings.length > 2 ? 10 : 0) + (analysis.details.images > 0 ? 10 : 0) + (analysis.details.links.internal > 3 ? 10 : 0) + (analysis.details.forms > 0 ? 5 : 0) + (analysis.details.metaDescription ? 10 : 0), 98);
-  analysis.reasons.push('Website has substantive content and appears to be a legitimate, active site');
-  return analysis;
-}
-
-// === ENDPOINTS ===
-
-app.post('/api/analyze', async (req, res) => {
-  const { domain: rawDomain } = req.body;
-  if (!rawDomain || rawDomain.trim().length === 0) return res.status(400).json({ error:'Domain is required' });
-
-  const domain = normalizeDomain(rawDomain);
-
-  const timestamp = new Date().toISOString();
-  console.log(`\n[SCAN] ${domain}`);
-
-  try {
-    // Fire domain-age (WHOIS) concurrently with DNS/SSL/HTTP — no sequential wait
-    const agePromise = Promise.race([
-      getDomainAge(domain),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('age-timeout')), 10000))
-    ]);
-
-    const [dnsResults, sslResults, httpResults] = await Promise.all([analyzeDNS(domain), analyzeSSL(domain), analyzeHTTPStatus(domain)]);
-    const { result: httpStatus, html } = httpResults;
-    const contentAnalysis = analyzeContent(html, domain, httpStatus.finalUrl);
-
-    // Detect WAF/proxy blocks: 403 with tiny non-HTML body
-    const isWAFBlock = httpStatus.isUp && httpStatus.statusCode === 403 && (
-      html.length === 0 ||
-      (html.length < 200 && !/<html/i.test(html) &&
-        /host not allowed|access denied|forbidden|blocked|not authorized/i.test(html)));
-
-    let overallStatus = 'UNKNOWN', statusColor = 'gray';
-    if (!dnsResults.hasARecord && !httpStatus.isUp) { overallStatus = 'DEAD'; statusColor = 'red'; }
-    else if (!httpStatus.isUp) { overallStatus = 'DOWN'; statusColor = 'red'; }
-    else if (isWAFBlock || contentAnalysis.verdict === 'BLOCKED') { overallStatus = 'BLOCKED'; statusColor = 'orange'; }
-    else if (contentAnalysis.verdict === 'CROSS_DOMAIN_REDIRECT') { overallStatus = 'CROSS_DOMAIN_REDIRECT'; statusColor = 'red'; }
-    else if (contentAnalysis.verdict === 'PARKED') { overallStatus = 'PARKED'; statusColor = 'orange'; }
-    else if (contentAnalysis.verdict === 'COMING_SOON') { overallStatus = 'COMING_SOON'; statusColor = 'yellow'; }
-    else if (contentAnalysis.verdict === 'SHELL_SITE') { overallStatus = 'SHELL_SITE'; statusColor = 'orange'; }
-    else if (contentAnalysis.verdict === 'NO_CONTENT') { overallStatus = 'NO_CONTENT'; statusColor = 'orange'; }
-    else if (contentAnalysis.verdict === 'DEFAULT_PAGE') { overallStatus = 'DEFAULT_PAGE'; statusColor = 'orange'; }
-    else if (contentAnalysis.verdict === 'SUSPENDED') { overallStatus = 'SUSPENDED'; statusColor = 'red'; }
-    else if (contentAnalysis.verdict === 'POLITICAL_CAMPAIGN') { overallStatus = 'POLITICAL_CAMPAIGN'; statusColor = 'blue'; }
-    else if (contentAnalysis.verdict === 'VALID' && ((httpStatus.statusCode >= 200 && httpStatus.statusCode < 400) || (httpStatus.statusCode === 403 && contentAnalysis.details.wordCount >= 100))) { overallStatus = 'ACTIVE'; statusColor = 'green'; }
-    else { overallStatus = 'ISSUES'; statusColor = 'yellow'; }
-
-    const genuinelyValid = ['ACTIVE','POLITICAL_CAMPAIGN'].includes(overallStatus);
-
-    // Await the already-running domain age promise (started concurrently above)
-    let domainAge = null;
-    try {
-      const ageResult = await agePromise;
-      if (ageResult && ageResult.createdDate) {
-        domainAge = { ageText: ageResult.ageText, createdDate: ageResult.createdDate, ageInDays: ageResult.ageInDays, registrar: ageResult.registrar };
-      }
-    } catch (e) { /* domain age is best-effort — never block the response */ }
-
-    console.log(`  -> ${overallStatus} | Words:${contentAnalysis.details.wordCount} Unique:${contentAnalysis.details.uniqueWordCount} | Valid:${genuinelyValid} | Age:${domainAge?.ageText || 'N/A'}`);
-    const result = { domain, timestamp, overallStatus, statusColor, isGenuinelyValid:genuinelyValid, dns:dnsResults, ssl:sslResults, http:httpStatus, content:contentAnalysis, domainAge };
-    res.json(result);
-  } catch (err) {
-    console.error(`  -> ERROR: ${err.message}`);
-    res.json({ domain, timestamp: new Date().toISOString(), overallStatus:'ERROR', statusColor:'red', isGenuinelyValid:false, error:err.message, domainAge:null });
-  }
-});
-
-app.post('/api/analyze/bulk', async (req, res) => {
-  const { domains } = req.body;
-  if (!domains || !Array.isArray(domains) || domains.length === 0) return res.status(400).json({ error:'Provide an array of domains' });
-  if (domains.length > 50) return res.status(400).json({ error:'Maximum 50 domains per request' });
-
-  console.log(`\n[BULK] ${domains.length} domains — batched concurrency (10 at a time)`);
-
-  // Helper: analyze a single domain, never throws — 30s hard cap per domain
-  async function analyzeSingleDomain(rawDomain) {
-    const domain = normalizeDomain(rawDomain);
-    const timeoutMs = 30000;
-    const work = (async () => {
-    try {
-      const [dnsResults, sslResults, httpResults] = await Promise.all([analyzeDNS(domain), analyzeSSL(domain), analyzeHTTPStatus(domain)]);
-      const { result: httpStatus, html } = httpResults;
-      const contentAnalysis = analyzeContent(html, domain, httpStatus.finalUrl);
-
-      // Detect WAF/proxy blocks
-      const isWAFBlock = httpStatus.isUp && httpStatus.statusCode === 403 && (
-        html.length === 0 ||
-        (html.length < 200 && !/<html/i.test(html) &&
-          /host not allowed|access denied|forbidden|blocked|not authorized/i.test(html)));
-
-      let overallStatus = 'UNKNOWN';
-      if (!dnsResults.hasARecord && !httpStatus.isUp) overallStatus = 'DEAD';
-      else if (!httpStatus.isUp) overallStatus = 'DOWN';
-      else if (isWAFBlock || contentAnalysis.verdict === 'BLOCKED') overallStatus = 'BLOCKED';
-      else if (contentAnalysis.verdict === 'CROSS_DOMAIN_REDIRECT') overallStatus = 'CROSS_DOMAIN_REDIRECT';
-      else if (contentAnalysis.verdict === 'PARKED') overallStatus = 'PARKED';
-      else if (contentAnalysis.verdict === 'COMING_SOON') overallStatus = 'COMING_SOON';
-      else if (contentAnalysis.verdict === 'SHELL_SITE') overallStatus = 'SHELL_SITE';
-      else if (contentAnalysis.verdict === 'NO_CONTENT') overallStatus = 'NO_CONTENT';
-      else if (contentAnalysis.verdict === 'DEFAULT_PAGE') overallStatus = 'DEFAULT_PAGE';
-      else if (contentAnalysis.verdict === 'SUSPENDED') overallStatus = 'SUSPENDED';
-      else if (contentAnalysis.verdict === 'POLITICAL_CAMPAIGN') overallStatus = 'POLITICAL_CAMPAIGN';
-      else if (contentAnalysis.verdict === 'VALID' && ((httpStatus.statusCode >= 200 && httpStatus.statusCode < 400) || (httpStatus.statusCode === 403 && contentAnalysis.details.wordCount >= 100))) overallStatus = 'ACTIVE';
-      else overallStatus = 'ISSUES';
-
-      console.log(`  [OK] ${domain} -> ${overallStatus}`);
-      return { domain, overallStatus, isGenuinelyValid:['ACTIVE','POLITICAL_CAMPAIGN'].includes(overallStatus), statusCode:httpStatus.statusCode, verdict:contentAnalysis.verdict, confidence:contentAnalysis.confidence, reasons:contentAnalysis.reasons, flags:contentAnalysis.flags, redirectInfo:contentAnalysis.redirectInfo, title:contentAnalysis.details.title, wordCount:contentAnalysis.details.wordCount, uniqueWordCount:contentAnalysis.details.uniqueWordCount };
-    } catch (err) {
-      console.log(`  [ERR] ${domain} -> ${err.message}`);
-      return { domain, overallStatus:'ERROR', isGenuinelyValid:false, error:err.message };
-    }
-    })();
-    return Promise.race([work, new Promise(resolve => setTimeout(() => {
-      console.log(`  [TIMEOUT] ${domain} -> exceeded ${timeoutMs}ms`);
-      resolve({ domain, overallStatus:'ERROR', isGenuinelyValid:false, error:`Analysis timed out after ${timeoutMs/1000}s` });
-    }, timeoutMs))]);
-  }
-
-  // Process in batches of 10 — parallel within each batch, sequential across batches
-  // 50 domains = 5 batches × ~4s each ≈ 20s total (vs 50 × 6s = 300s sequential)
-  const BATCH_SIZE = 10;
-  const results = [];
-  for (let i = 0; i < domains.length; i += BATCH_SIZE) {
-    const batch = domains.slice(i, i + BATCH_SIZE);
-    const batchResults = await Promise.all(batch.map(d => analyzeSingleDomain(d)));
-    results.push(...batchResults);
-    console.log(`  [BATCH] ${Math.min(i + BATCH_SIZE, domains.length)}/${domains.length} done`);
-  }
-
-  res.json({ total:results.length, results });
-});
-
-// ═══════════════════════════════════════════════════════════════
-// BUSINESS INFO EXTRACTION ENGINE v1.0
-// ═══════════════════════════════════════════════════════════════
-
-// --- US States lookup ---
-const US_STATES = {AL:'Alabama',AK:'Alaska',AZ:'Arizona',AR:'Arkansas',CA:'California',CO:'Colorado',CT:'Connecticut',DE:'Delaware',FL:'Florida',GA:'Georgia',HI:'Hawaii',ID:'Idaho',IL:'Illinois',IN:'Indiana',IA:'Iowa',KS:'Kansas',KY:'Kentucky',LA:'Louisiana',ME:'Maine',MD:'Maryland',MA:'Massachusetts',MI:'Michigan',MN:'Minnesota',MS:'Mississippi',MO:'Missouri',MT:'Montana',NE:'Nebraska',NV:'Nevada',NH:'New Hampshire',NJ:'New Jersey',NM:'New Mexico',NY:'New York',NC:'North Carolina',ND:'North Dakota',OH:'Ohio',OK:'Oklahoma',OR:'Oregon',PA:'Pennsylvania',RI:'Rhode Island',SC:'South Carolina',SD:'South Dakota',TN:'Tennessee',TX:'Texas',UT:'Utah',VT:'Vermont',VA:'Virginia',WA:'Washington',WV:'West Virginia',WI:'Wisconsin',WY:'Wyoming',DC:'District of Columbia'};
-const US_STATE_NAMES = Object.values(US_STATES).map(s => s.toLowerCase());
-const US_STATE_CODES = Object.keys(US_STATES);
-
-// --- Country TLD mapping ---
-const COUNTRY_TLDS = {'.ca':'Canada','.co.uk':'United Kingdom','.uk':'United Kingdom','.com.au':'Australia','.au':'Australia','.de':'Germany','.fr':'France','.es':'Spain','.it':'Italy','.nl':'Netherlands','.be':'Belgium','.ch':'Switzerland','.at':'Austria','.in':'India','.jp':'Japan','.cn':'China','.kr':'South Korea','.br':'Brazil','.mx':'Mexico','.nz':'New Zealand','.ie':'Ireland','.za':'South Africa','.se':'Sweden','.no':'Norway','.dk':'Denmark','.fi':'Finland','.pl':'Poland','.pt':'Portugal','.ru':'Russia','.sg':'Singapore','.ph':'Philippines','.my':'Malaysia','.th':'Thailand','.ng':'Nigeria','.ke':'Kenya','.gh':'Ghana'};
-
-// --- Country phone prefixes ---
-const PHONE_COUNTRY = [[/\+1[\s\-\(]/,'USA/Canada'],[/\+44\s?/,'United Kingdom'],[/\+61\s?/,'Australia'],[/\+49\s?/,'Germany'],[/\+33\s?/,'France'],[/\+91\s?/,'India'],[/\+81\s?/,'Japan'],[/\+86\s?/,'China'],[/\+52\s?/,'Mexico'],[/\+55\s?/,'Brazil'],[/\+64\s?/,'New Zealand'],[/\+353\s?/,'Ireland'],[/\+27\s?/,'South Africa']];
-
-// --- Canadian provinces (only match in address context, not as standalone words) ---
-const CA_PROVINCES = ['AB','BC','MB','NB','NL','NS','NT','NU','ON','PE','QC','SK','YT'];
-const CA_POSTAL = /[A-Z]\d[A-Z]\s?\d[A-Z]\d/i;
-// Strict: province must appear after a comma or with postal code nearby
-function hasCanadianAddress(text) {
-  // Must have actual CA postal code (e.g. M5V 3A8) to confirm Canada
-  if (CA_POSTAL.test(text)) return true;
-  // Province code alone is NOT enough — "CA" appears in US addresses too
-  // Require province + postal code nearby (within 30 chars)
-  for (const prov of CA_PROVINCES) {
-    const re = new RegExp(',\\s*' + prov + '\\b[\\s\\S]{0,20}[A-Z]\\d[A-Z]', 'i');
-    if (re.test(text)) return true;
-  }
-  return false;
-}
-
-// --- UK postcode ---
-const UK_POSTAL = /[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}/i;
-
-// --- AU states ---
-const AU_STATES = ['NSW','VIC','QLD','SA','WA','TAS','ACT','NT'];
-const AU_POSTAL = /\b\d{4}\b/;
-
-function cleanBusinessName(rawTitle, ogSiteName, schemaName, domain, footerName) {
-  // Helper: check if string is mostly ASCII/English
-  const isEnglish = (s) => { if (!s) return false; const nonAscii = s.replace(/[\x00-\x7F]/g, '').length; return nonAscii / s.length < 0.3; };
-
-  // Helper: is this an error page title?
-  const isErrorTitle = (s) => /^(403|404|500|502|503|forbidden|not found|error|access denied|unavailable|page not found)/i.test(s?.trim());
-
-  
-  // Helper: clean trailing/leading junk from a name
-  const cleanName = (s) => {
-    if (!s) return s;
-    let cleaned = s
-      .replace(/[•·|]+$/, '').replace(/^[•·|]+/, '')  // strip bullet/pipe at edges
-      .replace(/\s+/g, ' ').trim();
-    // Strip trailing text after em-dash/en-dash: "Genesee Community College—ANTI-TERRESTRIAL" → "Genesee Community College"
-    cleaned = cleaned.replace(/\s*[—–]\s*[A-Z][A-Za-z\s-]*$/, '').trim();
-    // Strip trailing taglines: "ASU engineering-driven health innovations improving lives" — if >5 words and last words are generic
-    cleaned = cleaned.replace(/\s+(engineering|technology|innovation|improving|building|creating|delivering|transforming|empowering|serving|advancing|providing|offering|leading|driving)[\s\-].{5,}$/i, '').trim();
-    // Strip trailing colon content: "Name: Tagline Here"
-    cleaned = cleaned.replace(/:\s+[A-Z].{10,}$/, '').trim();
-    return normalizeExtractedBusinessName(cleaned);
-  };
-
-  // Helper: strip subtitle like "Name - A Fidelity Company"
-  const stripSubtitle = (s) => {
-    if (!s) return s;
-    // "Name - A/An Subtitle" or "Name - Subtitle Here"
-    return s.replace(/\s*[-–—]\s*[Aa]n?\s+\w+\s+\w+.*$/, '').trim();
-  };
-
-  // Helper: is this just a domain name as the title?
-  const isDomainAsName = (s, dom) => {
-    if (!s) return false;
-    // Never reject pure ALL-CAPS acronyms (NAUW, IBM, etc.)
-    if (/^[A-Z]{2,8}$/.test(s.trim())) return false;
-    const cleaned = s.toLowerCase().replace(/[.\s]/g, '');
-    const domBase = dom.replace(/\.[a-z]+$/i, '').replace(/[.\-_]/g, '');
-    return cleaned === domBase || cleaned === dom.replace(/\./g, '') || /\.com$|\.net$|\.org$/i.test(s);
-  };
-
-  // Priority: Schema > Footer > OG site_name > cleaned title > domain
-  if (schemaName && schemaName.length > 2 && schemaName.length < 80 && isEnglish(schemaName) && !isErrorTitle(schemaName) && !isBoilerplateName(schemaName) && !isDomainAsName(schemaName, domain)) {
-    // If schema name contains a dash separator, score each part and pick the best business name
-    const dashParts = schemaName.split(/\s*[-–—]\s*/).map(p => p.trim()).filter(p => p.length > 1);
-    if (dashParts.length >= 2) {
-      const domBase = domain.replace(/\.[a-z]+$/i, '').replace(/[-_.]/g, '').toLowerCase();
-      let best = dashParts[0], bestScore = -99;
-      for (const p of dashParts) {
-        let s = 0;
-        // Strong domain match
-        if (p.toLowerCase().replace(/\s+/g, '').includes(domBase.substring(0, 5))) s += 20;
-        // Subtitle red flags — never pick these as the primary name
-        if (/^[Aa]n?\s+/i.test(p)) s -= 30;                        // "A Fidelity Company"
-        if (/\b(fidelity|division|subsidiary|affiliate|member)\b/i.test(p)) s -= 25;
-        if (/\b(real estate|brokerage)\b/i.test(p) && dashParts.length > 1) s -= 10;
-        // Proper business name signals
-        if (/^[A-Z][a-z]/.test(p)) s += 5;                          // Title-cased
-        if (/\b(LLC|Inc|Corp|Co|Ltd|Management|Systems|Mechanical|Plumbing|Service)\b/i.test(p)) s += 8;
-        if (/\b(University|College|Institute|Academy|School|Seminary|Polytechnic)\b/i.test(p)) s += 12;
-        if (p.length >= 4 && p.length <= 50) s += 3;
-        if (s > bestScore) { bestScore = s; best = p; }
-      }
-      return cleanName(best);
-    }
-    return cleanName(stripSubtitle(schemaName));
-  }
-  if (footerName && footerName.length > 2 && footerName.length < 80 && isEnglish(footerName) && !isBoilerplateName(footerName) && !isDomainAsName(footerName, domain)) return cleanName(footerName);
-  if (ogSiteName && ogSiteName.length > 2 && ogSiteName.length < 80 && isEnglish(ogSiteName) && !isErrorTitle(ogSiteName) && !isBoilerplateName(ogSiteName) && !isDomainAsName(ogSiteName, domain)) return cleanName(stripSubtitle(ogSiteName));
-
-  if (rawTitle && isEnglish(rawTitle) && !isErrorTitle(rawTitle) && !isBoilerplateName(rawTitle)) {
-    let name = rawTitle;
-    // Remove common prefixes
-    name = name.replace(/^(home|welcome to|welcome|about us?)\s*[-–—|:]\s*/i, '');
-    name = name.replace(/^(welcome to|welcome)\s+/i, '');
-
-    // Split on separators (|, –, —, :, and " - " with spaces)
-    const separators = /\s*[|–—:]\s*|\s+-\s+/;
-    if (separators.test(name)) {
-      const parts = name.split(separators).map(p => p.trim()).filter(p => p.length > 1);
-      if (parts.length >= 2) {
-        const domBase = domain.replace(/\.(com|net|org|info|biz|co|us|io|store|art|inc|godaddysites\.com)$/i, '').replace(/\d+/g, '');
-        const domWordsRaw = domBase.split(/[-_.]/).filter(w => w.length > 2);
-        // Also extract inner words: "bjunk" → also include "junk"
-        const domWords = [...domWordsRaw];
-        domWordsRaw.forEach(w => { if (w.length > 3) domWords.push(w.substring(1)); });
-
-        let best = parts[0], bestScore = -1;
-        for (let pi = 0; pi < parts.length; pi++) {
-          const p = parts[pi];
-          let score = 0;
-          const pLower = p.toLowerCase();
-
-          // First position bonus
-          if (pi === 0) score += 4;
-
-          // Domain word matches (strongest signal)
-          let domMatches = 0;
-          for (const dw of domWords) {
-            if (pLower.includes(dw.toLowerCase())) domMatches++;
-            else if (dw.length >= 4) {
-              const partWords = pLower.split(/\s+/);
-              for (const pw of partWords) {
-                if (pw.startsWith(dw.toLowerCase().substring(0, 4)) || dw.toLowerCase().startsWith(pw.substring(0, 4))) { domMatches += 0.5; break; }
-              }
-            }
-          }
-          score += domMatches * 10;
-
-          // Business suffix — boost more if preceded by proper name
-          if (/\b(LLC|Inc|Corp|Co|Ltd|Group|Associates|Partners|Agency|Management|Enterprises|Company)\b/i.test(p)) {
-            const hasPropName = /^[A-Z][a-z]/.test(p) || /['']s\b/.test(p);
-            score += hasPropName ? 6 : 2;
-          }
-          // Institution names (University, College, School, Institute, Academy)
-          if (/\b(University|College|Institute|Academy|School|Seminary|Polytechnic)\b/i.test(p)) score += 10;
-
-          // Penalize generic service-only descriptions
-          if (/^(hvac|plumbing|heating|cooling|electrical|roofing|cleaning|dental|legal|auto|real estate)\s+(service|solution|repair|company|specialist)/i.test(p)) score -= 4;
-          if (/^(best|top|#?\d|trusted|affordable|professional|premier|quality|expert|local|official|leading|certified|licensed)\b/i.test(p)) score -= 5;
-          if (/^(our|my)\s+(service|product|team|work|project|portfolio|blog|story|mission)/i.test(p)) score -= 8;
-          if (/^(service|about|contact|home|faq|blog|testimonial|review|portfolio|gallery|pricing|team)/i.test(p) && p.split(/\s+/).length <= 2) score -= 8;
-          if (/\b(dentist|plumber|lawyer|doctor|attorney|contractor|electrician|realtor|cleaning|repair|roofing|hvac|landscap)\w*\s*(in|near|for|of)?\s*$/i.test(p)) score -= 3;
-          if (/^\w+(\s+\w+)?\s+(dentist|plumber|lawyer|doctor|attorney|contractor|electrician|realtor|cleaning|company)\s*$/i.test(p)) score -= 4;
-          if (/\d[-\s]star/i.test(p)) score -= 5;
-
-          // Boost possessive names
-          if (/[A-Z][a-z]+['']s\b/.test(p)) score += 3;
-
-          if (p.length >= 5 && p.length <= 50) score += 2;
-          if (p.length > 60) score -= 2;
-          const caps = (p.match(/[A-Z][a-z]/g) || []).length;
-          if (caps >= 2) score += 1;
-
-          if (score > bestScore) { bestScore = score; best = p; }
-        }
-        name = best;
-      }
-    }
-    name = cleanName(stripSubtitle(name));
-    if (name.length > 2 && name.length < 100 && !isDomainAsName(name, domain)) return name;
-  }
-
-  // Fallback: humanize domain name — split camelCase, hyphenated slugs, and number prefixes
-  const base = domain.replace(/\.(com|net|org|info|biz|co|us|io|store|art|inc|godaddysites\.com)$/i, '');
-  const words = base.split(/[-_.]/).filter(w => w.length > 0);
-  const expanded = words.flatMap(w => {
-    if (/^\d+$/.test(w)) return [w]; // Keep pure numbers as-is (e.g. "307")
-    // Handle leading number + letters: "14k" → "14K", "1foryou" → "1 For You"
-    const leadNumMatch = w.match(/^(\d+)([a-zA-Z].*)$/);
-    if (leadNumMatch) {
-      const num = leadNumMatch[1];
-      const rest = leadNumMatch[2];
-
-      // Special case: single letter after number = unit/abbreviation, keep together
-      // "14k" → "14K", "4b" → "4B", "1st" → "1st"
-      if (rest.length <= 2) {
-        return [num + rest.toUpperCase()];
-      }
-
-      // Check if it starts with a short prefix (1-2 chars) + longer word
-      // "4bjunk" → "4B" + "Junk", "14kshowcase" → "14K" + "Showcase"
-      // Try 1-char prefix first (more common: k=karat, b=brothers)
-      const prefix1 = rest.match(/^([a-z])([a-z]{3,})$/i);
-      const prefix2 = rest.match(/^([a-z]{2})([a-z]{3,})$/i);
-      // Prefer 1-char if it looks like an abbreviation (single letter)
-      const prefixMatch = prefix1 || prefix2;
-      if (prefixMatch) {
-        const prefix = prefixMatch[1];
-        const mainWord = prefixMatch[2];
-        // Split mainWord on any camelCase or just capitalize
-        const mainSplit = mainWord.replace(/([a-z])([A-Z])/g, '$1 $2').split(' ');
-       const mainWords = mainSplit.map(s => s.charAt(0).toUpperCase() + s.slice(1));
-        return [num + prefix.toUpperCase(), ...mainWords];
-      }
-
-      // Split the alphabetic rest on camelCase and capitalize
-      const restSplit = rest.replace(/([a-z])([A-Z])/g, '$1 $2').split(' ');
-      const restWords = restSplit.map(s => s.charAt(0).toUpperCase() + s.slice(1));
-      return [num, ...restWords];
-    }
-    // Split camelCase: "NasonMechanical" → ["Nason", "Mechanical"]
-    const split = w.replace(/([a-z])([A-Z])/g, '$1 $2').split(' ');
-    return split.map(s => s.charAt(0).toUpperCase() + s.slice(1));
-  });
-  return expanded.filter(Boolean).join(' ') || domain;
-}
-
-function extractOGMeta(html) {
-  const get = (prop) => {
-    const m = html.match(new RegExp('<meta[^>]*property=["\']og:' + prop + '["\'][^>]*content=["\']([^"\']*)["\']', 'i'))
-           || html.match(new RegExp('<meta[^>]*content=["\']([^"\']*)["\'][^>]*property=["\']og:' + prop + '["\']', 'i'));
-    return m ? m[1].trim() : null;
-  };
-  return { siteName: get('site_name'), title: get('title'), description: get('description'), image: get('image'), url: get('url'), type: get('type') };
-}
-
-function extractContactInfo(html, bodyText) {
-  const result = { phones:[], emails:[], rawAddress:null };
-  const $ = cheerio.load(html);
-  const emailFalsePositives = /example\.com|test\.com|email\.com|yourdomain|sentry\.io|wixpress|google\.com|facebook\.com|w3\.org|schema\.org|jquery|wordpress|gravatar|godaddy/;
-
-  // 1. Emails from mailto: links via cheerio (most reliable)
-  $('a[href^="mailto:"]').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const email = href.replace(/^mailto:/i, '').split('?')[0].toLowerCase().trim();
-    if (email && /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(email) &&
-        !result.emails.includes(email) && !emailFalsePositives.test(email)) {
-      result.emails.push(email);
-    }
-  });
-
-  // 2. Emails from visible text (less reliable, filter false positives)
-  const textEmails = bodyText.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g) || [];
-  textEmails.forEach(e => {
-    const email = e.toLowerCase();
-    if (!result.emails.includes(email) && !emailFalsePositives.test(email)) result.emails.push(email);
-  });
-
-  // Helper: format raw digits to US phone
-  function formatPhone(digits) {
-    if (digits.length === 11 && digits.startsWith('1')) digits = digits.substring(1);
-    if (digits.length === 10) return '(' + digits.substring(0,3) + ') ' + digits.substring(3,6) + '-' + digits.substring(6);
-    return digits;
-  }
-
-  // 3. Phone numbers from tel: links via cheerio (most reliable)
-  $('a[href^="tel:"]').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const raw = href.replace(/^tel:/i, '').trim();
-    const digits = raw.replace(/\D/g, '');
-    if (digits.length >= 7 && !result.phones.some(ep => ep.replace(/\D/g, '') === digits)) {
-      result.phones.push(formatPhone(digits));
-    }
-  });
-
-  // 4. Phone numbers from body text (already formatted by the website)
-  const phonePatterns = [
-    /\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}/g,
-    /\+1[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/g,
-    /\+\d{1,3}[\s.\-]?\d{2,4}[\s.\-]?\d{3,4}[\s.\-]?\d{3,4}/g
-  ];
-  phonePatterns.forEach(p => {
-    const matches = bodyText.match(p) || [];
-    matches.forEach(phone => {
-      const digits = phone.replace(/\D/g, '');
-      if (digits.length >= 7 && digits.length <= 15 && !result.phones.some(ep => ep.replace(/\D/g, '') === digits)) {
-        result.phones.push(phone.trim());
-      }
-    });
-  });
-
-  return result;
-}
-
-// === STRUCTURED ADDRESS EXTRACTOR ===
-// Extracts address from HTML microdata, hCard, RDFa, and labeled sections
-
-function extractStructuredAddress(html) {
-  const results = [];
-  const $ = cheerio.load(html);
-
-  // Helper: get itemprop text content or content attribute
-  function getItemprop($scope, prop) {
-    const el = $scope.find(`[itemprop="${prop}"]`).first();
-    if (!el.length) return null;
-    return (el.attr('content') || el.text()).trim() || null;
-  }
-
-  // 1. Microdata: itemtype PostalAddress blocks
-  $('[itemtype*="PostalAddress"]').each((_, el) => {
-    const $block = $(el);
-    const addr = {
-      street: getItemprop($block, 'streetAddress'),
-      city:   getItemprop($block, 'addressLocality'),
-      state:  getItemprop($block, 'addressRegion'),
-      zip:    getItemprop($block, 'postalCode'),
-    };
-    if (addr.street || addr.city) results.push(addr);
-  });
-
-  // 2. itemprop attributes scattered (not wrapped in a PostalAddress block)
-  if (results.length === 0) {
-    const $doc = $.root();
-    const addr = {
-      street: getItemprop($doc, 'streetAddress'),
-      city:   getItemprop($doc, 'addressLocality'),
-      state:  getItemprop($doc, 'addressRegion'),
-      zip:    getItemprop($doc, 'postalCode'),
-    };
-    if (addr.street || addr.city) results.push(addr);
-  }
-
-  // 3. hCard / vCard: class="adr"
-  $('.adr').each((_, el) => {
-    const $block = $(el);
-    const addr = {
-      street: $block.find('.street-address').first().text().trim() || null,
-      city:   $block.find('.locality').first().text().trim() || null,
-      state:  $block.find('.region').first().text().trim() || null,
-      zip:    $block.find('.postal-code').first().text().trim() || null,
-    };
-    if (addr.street || addr.city) results.push(addr);
-  });
-
-  // 4. <address> HTML element — often contains actual address
-  $('address').each((_, el) => {
-    const text = $(el).text().replace(/\s+/g, ' ').trim();
-    if (/\d{1,6}\s+[A-Za-z]/.test(text) && (/\b[A-Z]{2}\b/i.test(text) || /\d{5}/.test(text))) {
-      results.push({ raw: text });
-    }
-  });
-
-  // 5. Footer address extraction via cheerio
-  const $footer = $('footer').first();
-  if ($footer.length) {
-    $footer.find('script, style').remove();
-    const footerText = $footer.text().replace(/\s+/g, ' ').trim();
-    const footerAddr = footerText.match(/(\d{1,6}\s+[A-Za-z][A-Za-z0-9\s.#'&/,-]{2,60}?\s+(?:Street|St\.?|Avenue|Ave\.?|Boulevard|Blvd\.?|Drive|Dr\.?|Road|Rd\.?|Lane|Ln\.?|Way|Court|Ct\.?|Place|Pl\.?|Circle|Cir\.?|Trail|Trl\.?|Parkway|Pkwy\.?|Highway|Hwy\.?|Terrace|Ter\.?|Pike)\.?(?:[,\s]+[A-Za-z][A-Za-z\s.'-]{1,40}[,\s]+[A-Z]{2}\s*\d{5}(?:-\d{4})?)?)/i);
-    if (footerAddr) results.push({ raw: footerAddr[0].trim() });
-  }
-
-  // 6. Labeled address patterns from visible text
-  $('script, style').remove();
-  const bodyText = $.text().replace(/\s+/g, ' ').trim();
-
-  const addRawCandidate = (value) => {
-    if (!value) return;
-    const cleaned = value.replace(/\s+/g, ' ').trim();
-    if (!cleaned || cleaned.length < 8) return;
-    if (!results.some(r => r.raw && r.raw.toLowerCase() === cleaned.toLowerCase())) {
-      results.push({ raw: cleaned });
-    }
-  };
-
-  const labeledPatterns = [
-    /(?:Address|Located\s+at|Our\s+(?:office|location)|Mailing\s+Address|Office\s+Address|Physical\s+Address|Street\s+Address|Headquarters|HQ|Corporate\s+Office|Visit\s+Us(?:\s+at)?)[:\s]+(\d{1,6}\s+[A-Za-z][A-Za-z0-9\s.#'&/,\-]{2,85}?\s+(?:Street|St\.?|Avenue|Ave\.?|Boulevard|Blvd\.?|Drive|Dr\.?|Road|Rd\.?|Lane|Ln\.?|Way|Court|Ct\.?|Place|Pl\.?|Circle|Cir\.?|Trail|Trl\.?|Parkway|Pkwy\.?|Highway|Hwy\.?|Terrace|Ter\.?|Pike)\.?(?:[,\s]+[A-Za-z][A-Za-z\s.'-]{1,40}[,\s]+[A-Z]{2}\s*\d{5}(?:-\d{4})?)?)/i,
-    /(?:Address|Located\s+at|Our\s+(?:office|location)|Mailing\s+Address|Office\s+Address|Physical\s+Address)[:\s]+([A-Za-z0-9][A-Za-z0-9\s.#'&/,\-]{4,120}?[A-Z]{2}\s*\d{5}(?:-\d{4})?)/i,
-  ];
-  for (const pat of labeledPatterns) {
-    const lm = bodyText.match(pat);
-    if (lm) { addRawCandidate(lm[1]); break; }
-  }
-
-  // 7. Rendered address widgets used by site builders (Duda/Thryv/etc) via cheerio
-  const $reload = cheerio.load(html);
-  $reload('[data-route="address"], [data-aid*="ADDRESS_RENDERED"]').each((_, el) => {
-    const text = $reload(el).text().replace(/\s+/g, ' ').trim();
-    if (!text) return;
-
-    const embeddedStreet = text.match(/(\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9\s.#'&/,-]{3,120},\s*[A-Za-z][A-Za-z\s.'-]{1,40},\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?(?:,\s*(?:US|USA|United\s+States))?)/i);
-    const embeddedPoBox = text.match(/((?:P\.?\s*O\.?|Post\s+Office)\s*Box\s*#?\s*[A-Z0-9-]{1,20}(?:\s*,?\s*[A-Za-z][A-Za-z\s.'-]{1,40}\s*,?\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)?)/i);
-
-    if (embeddedStreet) addRawCandidate(embeddedStreet[1]);
-    else if (embeddedPoBox) addRawCandidate(embeddedPoBox[1]);
-    else if (/\b(?:[A-Z]{2}\s*\d{5}(?:-\d{4})?|\d{5}(?:-\d{4})?)\b/.test(text)) addRawCandidate(text);
-  });
-
-  // 8. PO Box style addresses (common on contact pages)
-  const poBoxPatterns = [
-    /((?:P\.?\s*O\.?|Post\s+Office)\s*Box\s*#?\s*[A-Z0-9-]{1,20}\s*,?\s*[A-Za-z][A-Za-z\s.'-]{1,40}\s*,?\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)/gi,
-    /((?:P\.?\s*O\.?|Post\s+Office)\s*Box\s*#?\s*[A-Z0-9-]{1,20})/gi
-  ];
-  for (const pat of poBoxPatterns) {
-    const matches = bodyText.match(pat) || [];
-    matches.forEach(m => addRawCandidate(m));
-  }
-  return results;
-}
-
-// === BUSINESS NAME EXTRACTOR (ENHANCED) ===
-// Extract business name from additional HTML sources
-
-function extractEnhancedBusinessName(html) {
-  const candidates = [];
-  const $ = cheerio.load(html);
-
-  // 1. Logo alt text via cheerio — very reliable business name source
-  // Matches: class/id containing "logo", "brand", "site-logo", "header-logo", "custom-logo"
-  const logoSelectors = [
-    'img.logo', 'a.logo', 'img[class*="logo"]', 'a[class*="logo"]',
-    'img[id*="logo"]', 'a[id*="logo"]',
-    'img.brand', 'img[class*="site-logo"]', 'img[class*="header-logo"]',
-    'img[class*="custom-logo"]',
-  ];
-  for (const sel of logoSelectors) {
-    $(sel).each((_, el) => {
-      const alt = $(el).attr('alt') || '';
-      if (alt.trim().length > 2) {
-        const name = alt.trim().replace(/\s*logo\s*/gi, '').trim();
-        if (name.length > 2 && !/^(logo|image|img|banner|header|icon|photo|pic)$/i.test(name)) {
-          candidates.push({ name, source: 'logo-alt', priority: 8 });
-        }
-      }
-    });
-    if (candidates.length > 0) break; // first match wins
-  }
-
-  // 2. aria-label on header/nav via cheerio
-  $('header[aria-label], nav[aria-label]').each((_, el) => {
-    const label = $(el).attr('aria-label') || '';
-    const name = label.trim().replace(/\s*(main\s+)?(navigation|menu|header)\s*/gi, '').trim();
-    if (name.length > 2 && !/^(main|navigation|menu|header|sidebar|footer|content)$/i.test(name)) {
-      candidates.push({ name, source: 'aria-label', priority: 6 });
-    }
-  });
-
-  // 3. meta application-name via cheerio
-  const appName = $('meta[name="application-name"]').attr('content');
-  if (appName && appName.trim().length > 1) {
-    candidates.push({ name: appName.trim(), source: 'application-name', priority: 7 });
-  }
-
-  // 4. meta apple-mobile-web-app-title via cheerio
-  const appleTitle = $('meta[name="apple-mobile-web-app-title"]').attr('content');
-  if (appleTitle && appleTitle.trim().length > 1) {
-    candidates.push({ name: appleTitle.trim(), source: 'apple-title', priority: 7 });
-  }
-
-  // 5. Twitter card site name via cheerio
-  const twitterTitle = $('meta[name="twitter:title"], meta[property="twitter:title"]').attr('content');
-  if (twitterTitle && twitterTitle.trim().length > 1) {
-    candidates.push({ name: twitterTitle.trim(), source: 'twitter-title', priority: 5 });
-  }
-
-  // 6. itemprop="name" via cheerio (not inside script)
-  $('[itemprop="name"]').not('script [itemprop="name"]').each((_, el) => {
-    const name = $(el).text().trim();
-    if (name.length > 2 && !isBoilerplateName(name)) {
-      candidates.push({ name, source: 'itemprop-name', priority: 9 });
-    }
-  });
-
-  // 7. Copyright with full business name (regex on text — this is text pattern matching, not DOM)
-  const bodyText = $.text();
-  const copyrightMatch = bodyText.match(/(?:©|copyright)\s*(?:\d{4}\s*[-–]?\s*\d{0,4}\s*)?([A-Z][A-Za-z\s&'.,-]{2,60}?(?:LLC|Inc\.?|Corp\.?|Company|Co\.?|Ltd\.?|Group|Partners|Associates|Enterprises?))/i);
-  if (copyrightMatch) {
-    candidates.push({ name: copyrightMatch[1].trim(), source: 'copyright-legal', priority: 10 });
-  }
-
-  return candidates;
-}
-
-function extractSchemaOrg(html) {
-  const result = { name:null, phone:null, email:null, address:null, description:null, type:null, url:null, priceRange:null, rating:null, hours:[], legalName:null };
-  const $ = cheerio.load(html);
-
-  // Helper: recursively extract business-relevant items from nested JSON-LD
-  function processItem(item) {
-    if (!item || typeof item !== 'object') return;
-
-    if (item.name && !result.name) result.name = typeof item.name === 'string' ? item.name : null;
-    if (item.legalName && !result.legalName) result.legalName = item.legalName;
-    if (item.telephone && !result.phone) result.phone = item.telephone;
-    if (item.email && !result.email) result.email = item.email;
-    if (item.description && !result.description) result.description = typeof item.description === 'string' ? item.description : null;
-    if (item['@type'] && !result.type) result.type = Array.isArray(item['@type']) ? item['@type'][0] : item['@type'];
-    if (item.url && !result.url) result.url = item.url;
-    if (item.priceRange && !result.priceRange) result.priceRange = item.priceRange;
-    if (item.aggregateRating) result.rating = { value: item.aggregateRating.ratingValue, count: item.aggregateRating.reviewCount || item.aggregateRating.ratingCount };
-
-    // Address: handle nested PostalAddress, string, or location.address
-    const addrSource = item.address || item.location?.address;
-    if (addrSource && !result.address) {
-      const a = addrSource;
-      if (typeof a === 'string') result.address = { raw: a };
-      else result.address = {
-        raw: [a.streetAddress, a.addressLocality, a.addressRegion, a.postalCode, a.addressCountry].filter(Boolean).join(', '),
-        street: a.streetAddress || null,
-        city: a.addressLocality || null,
-        state: a.addressRegion || null,
-        zip: a.postalCode ? String(a.postalCode) : null,
-        country: a.addressCountry || null
+      const t0 = Date.now();
+      const r = await axios.get(u, {
+        timeout: 15000,
+        maxRedirects: 5,
+        validateStatus: () => true,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        maxContentLength: 3 * 1024 * 1024,
+      });
+      return {
+        isUp: true,
+        statusCode: r.status,
+        statusText: r.statusText,
+        finalUrl: r.request?.res?.responseUrl || u,
+        html: typeof r.data === 'string' ? r.data : '',
+        responseTime: Date.now() - t0,
+        headers: {
+          server: r.headers['server'] || null,
+          poweredBy: r.headers['x-powered-by'] || null,
+          contentType: r.headers['content-type'] || null,
+        },
       };
-    }
-
-    // location may itself have name/phone if it's a Place
-    if (item.location && typeof item.location === 'object' && !Array.isArray(item.location)) {
-      if (item.location.name && !result.name) result.name = item.location.name;
-      if (item.location.telephone && !result.phone) result.phone = item.location.telephone;
-    }
-
-    if (item.openingHoursSpecification) {
-      const specs = Array.isArray(item.openingHoursSpecification) ? item.openingHoursSpecification : [item.openingHoursSpecification];
-      if (result.hours.length === 0) result.hours = specs.map(s => ({ days: s.dayOfWeek, opens: s.opens, closes: s.closes }));
-    }
-
-    // Recurse into department, subOrganization, mainEntity, member
-    for (const sub of ['department', 'subOrganization', 'mainEntity', 'member', 'provider', 'brand']) {
-      if (item[sub]) {
-        const subItems = Array.isArray(item[sub]) ? item[sub] : [item[sub]];
-        subItems.forEach(si => processItem(si));
-      }
+    } catch (e) {
+      if (e.code === 'ENOTFOUND' || e.code === 'ECONNREFUSED') break;
     }
   }
-
-  $('script[type="application/ld+json"]').each((_, el) => {
-    try {
-      const jsonText = $(el).html();
-      if (!jsonText) return;
-      const data = JSON.parse(jsonText.trim());
-      const items = Array.isArray(data) ? data : data['@graph'] ? data['@graph'] : [data];
-      for (const item of items) processItem(item);
-    } catch (e) { /* ignore bad JSON-LD */ }
-  });
-  return result;
+  return { isUp: false, statusCode: 0, statusText: '', finalUrl: '', html: '', responseTime: 0, headers: {} };
 }
 
-// === SOCIAL SIGNAL EXTRACTOR ===
-// Extracts social media profile links from HTML
+// ─── Status Detection (DOM-first via Cheerio) ────────────────────────────────
 
-const SOCIAL_PLATFORMS = {
-  facebook:  { domain: 'facebook.com',    label: 'Facebook',   icon: 'fb' },
-  instagram: { domain: 'instagram.com',   label: 'Instagram',  icon: 'ig' },
-  twitter:   { domain: 'twitter.com',     label: 'Twitter/X',  icon: 'tw' },
-  x:         { domain: 'x.com',           label: 'Twitter/X',  icon: 'tw' },
-  linkedin:  { domain: 'linkedin.com',    label: 'LinkedIn',   icon: 'li' },
-  youtube:   { domain: 'youtube.com',     label: 'YouTube',    icon: 'yt' },
-  tiktok:    { domain: 'tiktok.com',      label: 'TikTok',     icon: 'tt' },
-  pinterest: { domain: 'pinterest.com',   label: 'Pinterest',  icon: 'pt' },
-  yelp:      { domain: 'yelp.com',        label: 'Yelp',       icon: 'yp' },
-  bbb:       { domain: 'bbb.org',         label: 'BBB',        icon: 'bbb' },
-  nextdoor:  { domain: 'nextdoor.com',    label: 'Nextdoor',   icon: 'nd' },
-  github:    { domain: 'github.com',      label: 'GitHub',     icon: 'gh' },
-  threads:   { domain: 'threads.net',     label: 'Threads',    icon: 'th' },
-  snapchat:  { domain: 'snapchat.com',    label: 'Snapchat',   icon: 'sc' },
-  whatsapp:  { domain: 'wa.me',           label: 'WhatsApp',   icon: 'wa' },
-  telegram:  { domain: 't.me',            label: 'Telegram',   icon: 'tg' },
-  vimeo:     { domain: 'vimeo.com',       label: 'Vimeo',      icon: 'vm' },
-  tumblr:    { domain: 'tumblr.com',      label: 'Tumblr',     icon: 'tb' },
-  reddit:    { domain: 'reddit.com',      label: 'Reddit',     icon: 'rd' },
-  googlebiz: { domain: 'google.com/maps', label: 'Google Business', icon: 'gb' },
-  houzz:     { domain: 'houzz.com',       label: 'Houzz',      icon: 'hz' },
-  angieslist:{ domain: 'angi.com',        label: 'Angi',       icon: 'ag' },
-  thumbtack: { domain: 'thumbtack.com',   label: 'Thumbtack',  icon: 'tt2' },
-};
+function detectStatus($, { statusCode, isUp, finalUrl, originalDomain }) {
+  if (!isUp) return 'DOWN';
 
-function extractSocialSignals(html, schema) {
-  const signals = {};
-  const $ = cheerio.load(html);
+  // ── DOM signals ──
+  const generator  = ($('meta[name="generator"]').attr('content') || '').toLowerCase();
+  const titleText  = $('title').text().trim().toLowerCase();
+  const bodyText   = $('body').text();
+  const bodyLower  = bodyText.toLowerCase();
+  const wordCount  = bodyText.split(/\s+/).filter(w => w.length > 2).length;
 
-  // 1. Extract from Schema.org sameAs via cheerio (most reliable)
-  $('script[type="application/ld+json"]').each((_, el) => {
-    try {
-      const data = JSON.parse($(el).html().trim());
-      const items = Array.isArray(data) ? data : data['@graph'] ? data['@graph'] : [data];
-      for (const item of items) {
-        const sameAs = item.sameAs;
-        if (sameAs) {
-          const urls = Array.isArray(sameAs) ? sameAs : [sameAs];
-          urls.forEach(url => { if (typeof url === 'string') classifySocialUrl(url, signals); });
-        }
-      }
-    } catch {}
-  });
+  // Structural presence (DOM selectors, no regex on raw HTML)
+  const hasNav         = $('nav, [role="navigation"]').length > 0;
+  const hasFooter      = $('footer').length > 0;
+  const hasContactLink = $('a[href^="tel:"], a[href^="mailto:"]').length > 0;
+  const hasForm        = $('form').length > 0;
 
-  // 2. Extract from <a href="..."> links via cheerio
-  $('a[href]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (href) classifySocialUrl(href, signals);
-  });
-
-  // 3. Extract from meta social tags via cheerio
-  $('meta[property*="social"], meta[name*="social"]').each((_, el) => {
-    const content = $(el).attr('content');
-    if (content) classifySocialUrl(content, signals);
-  });
-
-  // 4. Extract Google Business Profile from g.page links via cheerio
-  $('a[href*="g.page"]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (href && !signals.googlebiz) signals.googlebiz = { platform: 'Google Business', url: href, source: 'gpage' };
-  });
-
-  // 5. Extract from Google Maps links via cheerio
-  $('a[href*="google.com/maps/place"]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (href && !signals.googlebiz) signals.googlebiz = { platform: 'Google Business', url: href, source: 'maps' };
-  });
-  // Also check iframes for embedded Google Maps
-  $('iframe[src*="google.com/maps"]').each((_, el) => {
-    const src = $(el).attr('src');
-    if (src && !signals.googlebiz) signals.googlebiz = { platform: 'Google Business', url: src, source: 'maps-embed' };
-  });
-
-  // Convert to clean array format
-  const result = [];
-  for (const [key, val] of Object.entries(signals)) {
-    const platform = SOCIAL_PLATFORMS[key];
-    result.push({
-      platform: platform?.label || val.platform || key,
-      url: val.url,
-      icon: platform?.icon || key,
-    });
+  // ── CROSS_DOMAIN_REDIRECT ──
+  if (finalUrl && originalDomain) {
+    const finalRoot = rootDomain(finalUrl);
+    if (finalRoot && finalRoot !== originalDomain && !finalRoot.endsWith('.' + originalDomain)) {
+      return 'CROSS_DOMAIN_REDIRECT';
+    }
   }
 
-  return result;
+  // ── SUSPENDED: heading text check ──
+  const suspendedHeading = $('h1, h2').filter((_, el) =>
+    /account suspended|this account has been suspended|hosting suspended/i.test($(el).text())
+  );
+  if (suspendedHeading.length) return 'SUSPENDED';
+  // Also check prominent class/id names (DOM)
+  if ($('.suspended, #suspended, [class*="account-suspended"]').length) return 'SUSPENDED';
+
+  // ── DEFAULT PAGE: Apache / Nginx / IIS ──
+  const defaultHeading = $('h1').filter((_, el) =>
+    /^it works!?$|apache.*default page|test page for nginx|welcome to nginx|iis windows server/i.test($(el).text().trim())
+  );
+  if (defaultHeading.length) return 'DEFAULT_PAGE';
+  if (/test page for the nginx|welcome to nginx|apache2 ubuntu default/i.test(titleText)) return 'DEFAULT_PAGE';
+
+  // ── BLOCKED: Cloudflare / WAF ──
+  const hasCfDom = $('[class*="cf-error-"], [id*="cf-error"], [class*="cloudflare-error"], #challenge-body').length > 0;
+  if ((statusCode === 403 && wordCount < 150) || hasCfDom) return 'BLOCKED';
+
+  // ── PARKED ──
+  const parkingGenerators = ['sedo', 'parkingcrew', 'dan.com', 'afternic', 'bodis', 'smartname', 'above.com'];
+  if (parkingGenerators.some(g => generator.includes(g))) return 'PARKED';
+  // DOM: parking service links
+  if ($('a[href*="sedo.com"], a[href*="dan.com"], a[href*="afternic.com"], a[href*="parkingcrew.com"]').length) return 'PARKED';
+  // DOM: parking class/id patterns
+  if ($('[class*="parked-domain"], [id*="parked-domain"], [class*="domain-for-sale"]').length) return 'PARKED';
+  // Last resort: key phrase in body text (via cheerio .text(), not raw HTML)
+  const parkingPhrases = ['buy this domain', 'domain for sale', 'this domain is for sale', 'make an offer on this domain'];
+  if (parkingPhrases.some(p => bodyLower.includes(p)) && wordCount < 300) return 'PARKED';
+
+  // ── COMING SOON ──
+  const hasComingSoonDom = $('[class*="coming-soon"], [id*="coming-soon"], [class*="maintenance"], [class*="countdown"], [class*="under-construction"]').length > 0;
+  const comingSoonPhrases = ['coming soon', 'under construction', 'launching soon', "we'll be back", 'site is under maintenance', 'be right back'];
+  if ((hasComingSoonDom || comingSoonPhrases.some(p => bodyLower.includes(p))) && wordCount < 400) return 'COMING_SOON';
+
+  // ── SHELL SITE: website builder empty template ──
+  const isBuilder = /wix\.com|squarespace|weebly|godaddy website builder/i.test(generator);
+  const hasRealContent = (hasNav || hasFooter) && (hasContactLink || hasForm) && wordCount > 150;
+  if (isBuilder && !hasRealContent) return 'SHELL_SITE';
+
+  // ── NO CONTENT ──
+  if (wordCount < 40) return 'NO_CONTENT';
+
+  // ── ACTIVE ──
+  if (statusCode >= 200 && statusCode < 400 && wordCount >= 100) return 'ACTIVE';
+  if (isUp && wordCount >= 50 && hasRealContent) return 'ACTIVE';
+
+  return 'ISSUES';
 }
 
-function classifySocialUrl(url, signals) {
-  if (!url || typeof url !== 'string') return;
+// Map overallStatus to frontend verdict/confidence/reasons/flags
+function buildContentPayload($, overallStatus, finalUrl, originalDomain) {
+  const statusToVerdict = {
+    ACTIVE: 'VALID', PARKED: 'PARKED', COMING_SOON: 'COMING_SOON',
+    NO_CONTENT: 'NO_CONTENT', DEFAULT_PAGE: 'DEFAULT_PAGE', SUSPENDED: 'SUSPENDED',
+    SHELL_SITE: 'SHELL_SITE', CROSS_DOMAIN_REDIRECT: 'CROSS_DOMAIN_REDIRECT',
+    BLOCKED: 'BLOCKED', DEAD: 'DEAD', DOWN: 'DOWN', ISSUES: 'ISSUES',
+  };
+  const reasonMap = {
+    ACTIVE: 'Active website with meaningful content',
+    PARKED: 'Domain is parked or listed for sale',
+    COMING_SOON: 'Website is under construction or coming soon',
+    NO_CONTENT: 'Page returned minimal or no content',
+    DEFAULT_PAGE: 'Server default/test page detected',
+    SUSPENDED: 'Account or hosting has been suspended',
+    SHELL_SITE: 'Website builder template with no real business content',
+    CROSS_DOMAIN_REDIRECT: 'Domain redirects to a different unrelated domain',
+    BLOCKED: 'Access blocked by WAF or security service (e.g. Cloudflare)',
+    DEAD: 'No DNS records found and site is unreachable',
+    DOWN: 'Domain resolves but site is not responding',
+    ISSUES: 'Site has content but could not be confidently classified',
+  };
 
-  // Skip share/intent/sharer links — these are sharing widgets, not profile links
-  if (/\/share[r]?\b|\/intent\/|\/sharer\.php|\/dialog\/share|AddThis|addtoany/i.test(url)) return;
-  // Skip tracking pixels, SDK, widget, and plugin URLs
-  if (/\/widgets?\b|\/plugins?\b|\/sdk|\/badge|connect\.facebook|platform\.twitter|platform\.linkedin/i.test(url)) return;
-
-  const urlLower = url.toLowerCase();
-
-  for (const [key, platform] of Object.entries(SOCIAL_PLATFORMS)) {
-    if (urlLower.includes(platform.domain)) {
-      // For x.com/twitter, merge under the same key
-      const normalizedKey = key === 'x' ? 'twitter' : key;
-
-      // Skip root domain links without a profile path (e.g., "https://facebook.com")
-      try {
-        const parsed = new URL(url.startsWith('http') ? url : 'https://' + url);
-        const pathParts = parsed.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
-
-        // Google maps special handling — always allow
-        if (key === 'googlebiz') {
-          if (!signals[normalizedKey]) signals[normalizedKey] = { platform: platform.label, url, source: 'link' };
-          return;
-        }
-
-        // WhatsApp / Telegram — path is optional (wa.me/1234567890)
-        if (key === 'whatsapp' || key === 'telegram') {
-          if (!signals[normalizedKey]) signals[normalizedKey] = { platform: platform.label, url, source: 'link' };
-          return;
-        }
-
-        // Must have at least one path segment (username/page)
-        if (pathParts.length === 0) return;
-
-        // Skip generic paths that aren't profiles
-        const genericPaths = ['help', 'about', 'terms', 'privacy', 'policy', 'legal', 'login', 'signup', 'register', 'settings', 'explore', 'search', 'hashtag', 'watch', 'trending'];
-        if (genericPaths.includes(pathParts[0].toLowerCase())) return;
-
-      } catch {
-        // If URL parsing fails, still accept it
-      }
-
-      if (!signals[normalizedKey]) {
-        signals[normalizedKey] = { platform: platform.label, url, source: 'link' };
-      }
-      return;
-    }
+  // Confidence: DOM-based signals
+  let confidence = 70;
+  if (overallStatus === 'ACTIVE') {
+    confidence = 50;
+    if ($('nav').length) confidence += 15;
+    if ($('a[href^="tel:"], a[href^="mailto:"]').length) confidence += 15;
+    if ($('footer').length) confidence += 10;
+    if ($('script[type="application/ld+json"]').length) confidence += 10;
+    confidence = Math.min(95, confidence);
+  } else if (['PARKED', 'SUSPENDED', 'DEFAULT_PAGE'].includes(overallStatus)) {
+    confidence = 90;
+  } else if (['DEAD', 'DOWN', 'BLOCKED'].includes(overallStatus)) {
+    confidence = 95;
   }
+
+  // Flags from DOM
+  const flags = [];
+  if (overallStatus === 'CROSS_DOMAIN_REDIRECT') flags.push('CROSS_DOMAIN_REDIRECT');
+  if (overallStatus === 'PARKED') flags.push('PARKED');
+  if (overallStatus === 'SHELL_SITE') flags.push('SHELL_SITE');
+  if ($('script[type="application/ld+json"]').length) flags.push('HAS_SCHEMA_ORG');
+  if ($('form[action*="login"], input[type="password"]').length) flags.push('WEB_APP_LOGIN');
+  if ($('[class*="recaptcha"], [data-sitekey]').length) flags.push('HAS_RECAPTCHA');
+
+  // DOM-based content details
+  const bodyText = $('body').text();
+  const words = bodyText.split(/\s+/).filter(w => w.length > 2);
+  const uniqueWordCount = new Set(words.map(w => w.toLowerCase())).size;
+
+  return {
+    verdict: statusToVerdict[overallStatus] || overallStatus,
+    confidence,
+    reasons: [reasonMap[overallStatus] || overallStatus],
+    flags,
+    redirectInfo: overallStatus === 'CROSS_DOMAIN_REDIRECT'
+      ? { source: originalDomain, target: finalUrl, method: 'HTTP redirect' }
+      : null,
+    details: {
+      title: $('title').text().trim(),
+      wordCount: words.length,
+      uniqueWordCount,
+      headings: $('h1, h2, h3').map((_, el) => $(el).text().trim()).get().filter(Boolean).slice(0, 5),
+      images: $('img').length,
+      links: {
+        internal: $(`a[href^="/"], a[href*="${originalDomain}"]`).length,
+        external: $('a[href^="http"]').not(`[href*="${originalDomain}"]`).length,
+      },
+      forms: $('form').length,
+    },
+  };
 }
 
-function parseUSAddress(rawAddress) {
-  const result = { street: '', city: '', state: '', zip: '' };
-  if (!rawAddress) return result;
-const rawInput = decodeHTML(String(rawAddress));
-  const rawLines = rawInput
-    .split(/\r?\n+/)
-    .map(l => l.trim())
-    .filter(Boolean);
+// ─── Domain Age (RDAP chain) ─────────────────────────────────────────────────
 
-  // Address blobs from scraped tables can contain header rows and unrelated lines.
-  // When address is split across lines (street on one, city/state/zip on another), combine them.
-  if (rawLines.length > 1) {
-    const headerOnly = /^\s*(street\s*address|address|city|state|zip|postal\s*code)\s*$/i;
-    const cityStateZipPattern = /\b[A-Za-z][A-Za-z\s.'-]{1,30}\s+[A-Za-z]{2}\s+\d{5}(?:-\d{4})?\b/;
-    const streetStartPattern = /^\d{1,6}\s+/;
-    const filteredLines = rawLines.filter(line => !headerOnly.test(line));
+async function getDomainAge(domain) {
+  const empty = { createdDate: null, ageInDays: null, ageText: null, registrar: null };
 
-    // Check if street and city/state/zip are on separate lines — combine them
-    const streetLine = filteredLines.find(line => streetStartPattern.test(line));
-    const cszLine = filteredLines.find(line => cityStateZipPattern.test(line));
-    if (streetLine && cszLine && streetLine !== cszLine) {
-      rawAddress = streetLine + ', ' + cszLine;
-    } else {
-      const preferredLine = filteredLines.find(line => cityStateZipPattern.test(line))
-        || streetLine
-        || filteredLines[0];
-      if (preferredLine) rawAddress = preferredLine;
+  function parseRdap(data) {
+    const events = Array.isArray(data.events) ? data.events : [];
+    const ev = events.find(e => /^registr|^creat/i.test(e.eventAction || ''));
+    const raw = ev?.eventDate || data.creationDate || data.created;
+    if (!raw) return null;
+    const created = new Date(raw);
+    if (isNaN(created.getTime())) return null;
+    const days = Math.floor((Date.now() - created.getTime()) / 86400000);
+    // Registrar from RDAP entities
+    let registrar = null;
+    for (const entity of data.entities || []) {
+      if (entity.roles?.includes('registrar')) {
+        const fn = entity.vcardArray?.[1]?.find(v => v[0] === 'fn');
+        registrar = fn?.[3] || null;
+        break;
+      }
     }
-  }
-     let addr = decodeHTML(String(rawAddress))
-    .replace(/[\[\]{}<>]/g, ' ')
-    .replace(/[|]/g, ', ')
-    .replace(/\s+/g, ' ')
-    .replace(/,+/g, ',')
-    .replace(/^\s*,|,\s*$/g, '')
-    .replace(/,\s*(?:US|USA|United\s+States)\s*$/i, '')
-    .trim();
-
-  // Remove common non-address lead-in noise before parsing.
-  addr = addr
-    .replace(/^\s*CCB\s*#?\s*\d+\s*,?\s*/i, '')
-    .replace(/^\s*(?:sign\s*up|subscribe|newsletter)\b[^\dP]{0,60}/i, '')
-    .trim();
-
-  // If a PO Box appears later in a noisy string, slice to it.
-  const poStart = addr.search(/(?:P\.?\s*O\.?|Post\s+Office)\s*Box\b/i);
-  if (poStart > 0) addr = addr.substring(poStart).trim();
-
-  // If a numeric street appears later in a noisy string, slice to the first likely street number.
-  const streetStart = addr.search(/\b\d{1,6}\s+[A-Za-z]/);
-  if (streetStart > 0 && !/^(?:P\.?\s*O\.?|Post\s+Office)\s*Box\b/i.test(addr)) {
-    addr = addr.substring(streetStart).trim();
+    return { createdDate: created.toISOString().split('T')[0], ageInDays: days, ageText: formatAgeText(days), registrar };
   }
 
-  // PO Box format: "P.O. Box 5745, Salem, OR 97304"
-  const poBoxFull = addr.match(/^(?:P\.?\s*O\.?|Post\s+Office)\s*Box\s*#?\s*([A-Z0-9-]{1,20})\s*,\s*([A-Za-z][A-Za-z\s.'-]{1,40})\s*,\s*([A-Z]{2})\s*(\d{5})(?:-\d{4})?\s*$/i)
-    || addr.match(/^(?:P\.?\s*O\.?|Post\s+Office)\s*Box\s*#?\s*([A-Z0-9-]{1,20})\s+([A-Za-z][A-Za-z\s.'-]{1,40})\s+([A-Z]{2})\s*(\d{5})(?:-\d{4})?\s*$/i)
-    || addr.match(/^(?:P\.?\s*O\.?|Post\s+Office)\s*Box\s*#?\s*([A-Z0-9-]{1,20})\b(?:\s*,\s*|\s+)(?:.*?\s+)?([A-Za-z][A-Za-z\s.'-]{1,40})\s*,\s*([A-Z]{2})\s*(\d{5})(?:-\d{4})?\s*$/i);
-  if (poBoxFull) {
-    result.street = `P.O. Box ${poBoxFull[1].toUpperCase()}`;
-    result.city = poBoxFull[2].trim();
-    result.state = poBoxFull[3].toUpperCase();
-    result.zip = poBoxFull[4];
-    return result;
-  }
- 
-  const cleanToken = (v = '') => String(v).replace(/^\s*,|,\s*$/g, '').replace(/\s+/g, ' ').trim();
-   const stripPOBoxFromStreet = (street) => {
-    const s = cleanToken(street);
-    if (!s) return s;
-    return s
-      .replace(/(?:,?\s+|\s+)(?:P\.?\s*O\.?|POST\s+OFFICE)\s*BOX\s*#?\s*[A-Z0-9-]+\b.*$/i, '')
-      .replace(/[,;:\-]+$/, '')
-      .trim();
-  };
-  const stripTrailingCityFromStreet = (street, city) => {
-    const s = cleanToken(street);
-    const c = cleanToken(city);
-    if (!s || !c) return s;
-    const escapedCity = c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return s.replace(new RegExp(`(?:,?\\s+)${escapedCity}$`, 'i'), '').replace(/,\s*$/, '').trim();
-  };
+  const tld = domain.split('.').pop();
+  // Ordered RDAP sources: direct registry first, then community proxies
+  const sources = [];
+  if (tld === 'com') sources.push(`https://rdap.verisign.com/com/v1/domain/${domain}`);
+  if (tld === 'net') sources.push(`https://rdap.verisign.com/net/v1/domain/${domain}`);
+  if (tld === 'org') sources.push(`https://rdap.publicinterestregistry.org/rdap/domain/${domain}`);
+  sources.push(`https://rdap.org/domain/${domain}`, `https://rdapserver.net/domain/${domain}`);
 
-  // Strict full-address format: STREET, CITY, STATE ZIP
-  const strictComma = addr.match(/^\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([A-Za-z]{2})\s*(\d{5})(?:-\d{4})?\s*$/);
-  if (strictComma) {
-    result.street = cleanToken(strictComma[1]);
-    result.city = cleanToken(strictComma[2]);
-    result.state = strictComma[3].toUpperCase();
-    result.zip = strictComma[4];
-
-    // City must never be numeric ZIP data
-    if (/^\d{5}$/.test(result.city)) {
-      result.zip = result.zip || result.city;
-      result.city = '';
-    }
-
-    result.street = stripTrailingCityFromStreet(result.street, result.city);
-    return result;
-  }
-  
-  // Extract ZIP code (US 5-digit or 5+4)
-  const zipMatch = addr.match(/\b(\d{5}(?:-\d{4})?)\b/);
-  if (zipMatch) result.zip = zipMatch[1];
-
-  // Prefer explicit ", City, ST ZIP" / ", City ST ZIP" tail patterns
-  let tail = addr.match(/,\s*([A-Za-z][A-Za-z\s.'-]{1,40}),\s*([A-Za-z]{2})\s*(\d{5}(?:-\d{4})?)?\b/);
-  if (!tail) {
-    tail = addr.match(/,\s*([A-Za-z][A-Za-z\s.'-]{1,40})\s+([A-Za-z]{2})\s*(\d{5}(?:-\d{4})?)?\b/);
-  }
-  if (tail) {
-    result.city = tail[1].trim();
-    result.state = tail[2].toUpperCase();
-    if (tail[3]) result.zip = tail[3];
-  }
- // Also support non-comma format like: "267 DEDHAM St NORFOLK MA 02056"
-  if (!result.city || !result.state || !result.street) {
-    const noCommaFull = addr.match(/^(\d{1,6}\s+[A-Za-z0-9\s.#'&/,-]{2,90}?\s+(?:Street|St\.?|Avenue|Ave\.?|Boulevard|Blvd\.?|Drive|Dr\.?|Road|Rd\.?|Lane|Ln\.?|Way|Court|Ct\.?|Place|Pl\.?|Circle|Cir\.?|Trail|Trl\.?|Parkway|Pkwy\.?|Highway|Hwy\.?|Terrace|Ter\.?|Pike))\s+([A-Za-z][A-Za-z\s.'-]{1,40})\s+([A-Z]{2})\s*(\d{5}(?:-\d{4})?)\b/i);
-    if (noCommaFull) {
-      if (!result.street) result.street = noCommaFull[1].trim();
-      if (!result.city) result.city = noCommaFull[2].trim();
-      if (!result.state) result.state = noCommaFull[3].toUpperCase();
-      if (!result.zip) result.zip = noCommaFull[4];
-    }
-  }
-  // Fallback: extract state code only from end-ish context (avoid street suffixes like Ct/Ct.)
-  if (!result.state) {
-    for (const code of US_STATE_CODES) {
-      const re = new RegExp('(?:,\\s*|\\s)(' + code + ')(?:\\s+\\d{5}(?:-\\d{4})?)?(?:\\s*$|[,])');
-      const m = addr.match(re);
-      if (m) { result.state = code; break; }
-    }
-    }
-  // Try full state names
-  if (!result.state) {
-    for (const [code, name] of Object.entries(US_STATES)) {
-      if (addr.toLowerCase().includes(name.toLowerCase())) { result.state = code; break; }
-    }
-  }
-
-  // Parse by comma-separated parts
-  const parts = addr.split(',').map(p => p.trim()).filter(p => p.length > 0);
-
-  if (parts.length >= 3) {
-    // "123 Main St, City, ST 12345" or "123 Main St, Suite 100, City, ST 12345"
-    result.street = parts[0];
-    // Walk backwards: last part has state+zip, second-to-last is city
-    const lastPart = parts[parts.length - 1];
-    // Remove state and zip from last part to check if city is there
-    let cityPart = parts[parts.length - 2];
-    // If last part only has state/zip, city is second-to-last
-    if (/^\s*[A-Za-z]{2}\s*\d{5}/i.test(lastPart) || /^\s*[A-Za-z]{2}\s*$/i.test(lastPart)) {
-      result.city = cityPart;
-    } else {
-      // City might be in the last part before state
-      const cityMatch = lastPart.match(/^([A-Za-z\s.'-]+?)(?:\s+[A-Za-z]{2}\s*\d{5}|\s+[A-Za-z]{2}\s*$)/i);
-      if (cityMatch) result.city = cityMatch[1].trim();
-      else result.city = cityPart; // fallback
-    }
-    // If we have 4+ parts, combine first parts as street
-    if (parts.length >= 4) {
-      result.street = parts.slice(0, parts.length - 2).join(', ');
-    }
-  } else if (parts.length === 2) {
-    // Could be "City, ST 12345" OR "123 Main St, City"
-    const part2 = parts[1].trim();
-    const hasStateZip = /[A-Za-z]{2}\s*\d{5}/i.test(part2) || /^\s*[A-Za-z]{2}\s*$/i.test(part2);
-    const hasStreetWords = /\b(street|st|avenue|ave|boulevard|blvd|drive|dr|road|rd|lane|ln|way|court|ct|place|pl|circle|cir|trail|trl|parkway|pkwy|highway|hwy|terrace|ter|pike|suite|ste|unit|#)\b/i.test(parts[0]);
-
-   
-     if (hasStreetWords) {
-       // "123 Main St, City ST 12345"
-       result.street = parts[0];
-       const cityMatch = part2.match(/^([A-Za-z\s.'-]+?)(?:\s+[A-Za-z]{2}(?:\s+\d{5})?|\s*$)/i);
-       if (cityMatch) result.city = cityMatch[1].trim();
-     } else if (hasStateZip) {
-       // "City, ST 12345" — no street
-       result.city = parts[0];
-     } else {
-       // Ambiguous — assume "Street, City"
-       result.street = parts[0];
-       result.city = parts[1];
-     }
-   } else {
-     // Single string — try "City ST ZIP" pattern
-     const csMatch = addr.match(/^(.+?),?\s+([A-Z]{2})\s*(\d{5}(?:-\d{4})?)?$/i);
-     if (csMatch) {
-       const hasStreet = /\b(street|st|avenue|ave|boulevard|blvd|drive|dr|road|rd|lane|ln|way|court|ct|place|pl|circle|cir|trail|trl|parkway|pkwy|highway|hwy|terrace|ter|pike|suite|ste|unit|#|\d+)\b/i.test(csMatch[1]);
-       if (hasStreet) result.street = csMatch[1].trim();
-       else result.city = csMatch[1].trim();
-       result.state = csMatch[2].toUpperCase();
-       if (csMatch[3]) result.zip = csMatch[3];
-     }
-  // Fallback no-comma format: "Street City ST ZIP"
-     const noCommaCityStateZip = addr.match(/(.*)\s([A-Za-z\s]+)\s([A-Za-z]{2})\s(\d{5})$/);
-     if (noCommaCityStateZip) {
-       const fallbackStreet = cleanToken(noCommaCityStateZip[1]);
-       const fallbackCity = cleanToken(noCommaCityStateZip[2]);
-       const fallbackState = noCommaCityStateZip[3].toUpperCase();
-       const fallbackZip = noCommaCityStateZip[4];
-       if (fallbackCity && /^[A-Za-z][A-Za-z\s.'-]*$/.test(fallbackCity) && fallbackCity !== fallbackState) {
-         if (!result.street) result.street = fallbackStreet;
-         if (!result.city) result.city = fallbackCity;
-         if (!result.state) result.state = fallbackState;
-         if (!result.zip) result.zip = fallbackZip;
-       }
-     } 
-  }
- 
-  // If street accidentally captured only city/state text, demote it
-  if (result.street) {
-    const cityStateOnly = result.street.match(/^([A-Za-z][A-Za-z\s.'-]{1,40}),?\s+([A-Z]{2})(?:\s+(\d{5}(?:-\d{4})?))?$/i);
-    if (cityStateOnly && !/\d+\s+\w+/.test(result.street)) {
-      if (!result.city) result.city = cityStateOnly[1].trim();
-      if (!result.state) result.state = cityStateOnly[2].toUpperCase();
-      if (!result.zip && cityStateOnly[3]) result.zip = cityStateOnly[3];
-      result.street = '';
-    }
-  }
-
-  // Strip dangling punctuation / special suffix artifacts
-  if (result.street) {
-    result.street = result.street
-      .replace(/[\]\[{}<>]+/g, ' ')
-      .replace(/[•·]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .replace(/[,;:\-]+$/, '')
-      .trim();
-  }
-  
-   // Clean up city - remove any trailing state/zip and block ZIP in city
-   result.city = cleanToken(result.city).replace(/\s+[A-Za-z]{2}\s*\d{5}.*$/i, '').replace(/\s+[A-Za-z]{2}\s*$/i, '').trim();
-   // Strip leading street suffix words that bled into city (e.g., "Lane Cape Coral" -> "Cape Coral")
-   const streetSuffixes = new Set(['street','st','road','rd','avenue','ave','boulevard','blvd','lane','ln','drive','dr','court','ct','way','place','pl','circle','cir','trail','trl','parkway','pkwy','highway','hwy','terrace','ter','pike']);
-   {
-     let cityWords = result.city.split(/\s+/);
-     while (cityWords.length > 0 && streetSuffixes.has(cityWords[0].toLowerCase().replace(/\.$/,''))) {
-       cityWords.shift();
-     }
-     result.city = cityWords.join(' ');
-   }
-   if (/^\d{5}$/.test(result.city)) {
-     if (!result.zip) result.zip = result.city;
-     result.city = '';
-   }
-
-   // Keep ZIP as 5 digits only and avoid ZIP duplication into city
-   if (result.zip) {
-     const zip5 = String(result.zip).match(/\b(\d{5})\b/);
-     result.zip = zip5 ? zip5[1] : '';
-     if (result.zip && result.city === result.zip) result.city = '';
-   }
-
-   result.street = stripTrailingCityFromStreet(result.street, result.city);
-   result.street = cleanToken(result.street);
-   result.city = cleanToken(result.city);
- 
-   return result;
- }
- 
- function detectCountry(html, domain, schemaAddress, phones) {
-   // Priority 1: Schema.org country
-   if (schemaAddress?.country) {
-     const c = schemaAddress.country;
-     if (c === 'US' || c === 'USA' || c === 'United States') return { code: 'US', name: 'United States', confidence: 'high' };
-     if (c === 'CA' || c === 'Canada') return { code: 'CA', name: 'Canada', confidence: 'high' };
-     if (c === 'AU' || c === 'Australia') return { code: 'AU', name: 'Australia', confidence: 'high' };
-     if (c === 'GB' || c === 'UK' || c === 'United Kingdom') return { code: 'GB', name: 'United Kingdom', confidence: 'high' };
-     return { code: c, name: c, confidence: 'high' };
-   }
- 
-   // Priority 2: Country TLD
-   for (const [tld, country] of Object.entries(COUNTRY_TLDS)) {
-     if (domain.endsWith(tld)) {
-       const code = tld.replace(/^\.(?:com?\.)?/, '').toUpperCase();
-       return { code, name: country, confidence: 'high' };
-     }
-   }
-
-   // Clean body text: strip scripts, styles, AND tags — prevents CSS/HTML artifact matches
-   const bodyText = html
-     .replace(/<script[\s\S]*?<\/script>/gi, '')
-     .replace(/<style[\s\S]*?<\/style>/gi, '')
-     .replace(/<[^>]+>/g, ' ')
-     .replace(/&[a-z]+;/gi, ' ')
-     .replace(/\s+/g, ' ');
-
-   // Valid US state codes for address matching
-   const US_STATE_SET = new Set([
-     'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA',
-     'ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK',
-     'OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC'
-   ]);
-
-   // Priority 3: US ZIP code + state in body text (strongest US signal)
-   // Matches: ", FL 33404", "Naples FL 33404", "Naples, Florida 33404"
-   const usZipWithComma = /,\s*([A-Z]{2})\s+(\d{5})\b/.exec(bodyText);
-   const usZipNoComma = /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+([A-Z]{2})\s+(\d{5})\b/.exec(bodyText);
-   const usFullState = /\b(Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New\s+Hampshire|New\s+Jersey|New\s+Mexico|New\s+York|North\s+Carolina|North\s+Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode\s+Island|South\s+Carolina|South\s+Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West\s+Virginia|Wisconsin|Wyoming)\b/i.test(bodyText);
-
-   const hasUSZip = (usZipWithComma && US_STATE_SET.has(usZipWithComma[1])) ||
-                    (usZipNoComma && US_STATE_SET.has(usZipNoComma[2]));
-
-   if (hasUSZip) {
-     // Double-check Canadian: if STRICT Canadian postal + province found, it's Canada
-     if (hasCanadianAddress(bodyText)) return { code: 'CA', name: 'Canada', confidence: 'medium' };
-     return { code: 'US', name: 'United States', confidence: 'high' };
-   }
-
-   // Priority 4: Full US state name in text (e.g. "Florida", "North Carolina")
-   if (usFullState && /\.(com|net|org|us|info|biz)$/i.test(domain)) {
-     return { code: 'US', name: 'United States', confidence: 'medium' };
-   }
-
-   // Priority 5: US toll-free numbers (800, 833, 844, 855, 866, 877, 888)
-   const allPhoneText = (phones || []).join(' ') + ' ' + bodyText;
-   const US_TOLL_FREE = /\b(800|833|844|855|866|877|888)[\s.\-]\d{3}[\s.\-]\d{4}\b/;
-   if (US_TOLL_FREE.test(allPhoneText)) {
-     if (hasCanadianAddress(bodyText)) return { code: 'CA', name: 'Canada', confidence: 'medium' };
-     return { code: 'US', name: 'United States', confidence: 'high' };
-   }
-
-   // Priority 6: 10-digit US/CA phone pattern (with or without +1 prefix)
-   const hasUSPhone = /\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}/.test(allPhoneText);
-
-   // Priority 7: Phone with explicit international prefix
-   if (phones && phones.length > 0) {
-     for (const [regex, country] of PHONE_COUNTRY) {
-       if (phones.some(p => regex.test(p))) {
-         if (country === 'USA/Canada') {
-           if (hasCanadianAddress(bodyText)) return { code: 'CA', name: 'Canada', confidence: 'medium' };
-           return { code: 'US', name: 'United States', confidence: 'medium' };
-         }
-         return { code: country.substring(0, 2).toUpperCase(), name: country, confidence: 'medium' };
-       }
-     }
-   }
-
-   // Priority 8: If US 10-digit phone on a generic TLD → US
-   if (hasUSPhone && /\.(com|net|org|us|info|biz)$/i.test(domain)) {
-     if (hasCanadianAddress(bodyText)) return { code: 'CA', name: 'Canada', confidence: 'low' };
-     return { code: 'US', name: 'United States', confidence: 'medium' };
-   }
-
-   // Priority 9: Canadian postal code — STRICT context required
-   // Must appear after a comma or city-like word, not random strings like product codes
-   // Real: "Toronto, ON M5V 3A8" or "M5V 3A8" at end of address block
-   // False: "model T4E 5K3", "ref B2C 3D4"
-   const strictCApat = /(?:,\s*[A-Z]{2}\s+|[Cc]anada\s+|[A-Z][a-z]+,?\s+(?:AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT)\s+)[A-Z]\d[A-Z]\s?\d[A-Z]\d/;
-   if (strictCApat.test(bodyText)) return { code: 'CA', name: 'Canada', confidence: 'medium' };
-
-   // Priority 10: UK postcode — STRICT context required
-   // Must follow a comma or known UK city/county name, not random text
-   // Real: "London, SW1A 1AA" or ", EC2R 8AH"
-   // False: "model P2 0BX", "item B1 2CD"
-   const strictUKpat = /(?:,\s*|[Ll]ondon\s+|[Mm]anchester\s+|[Bb]irmingham\s+|[Ll]iverpool\s+|[Ll]eeds\s+|[Bb]ristol\s+|[Ss]heffield\s+|[Ee]dinburgh\s+|[Gg]lasgow\s+|[Cc]ardiff\s+|[Bb]elfast\s+|[Ee]ngland\s+|[Ss]cotland\s+|[Ww]ales\s+|United Kingdom\s+|UK\s+)[A-Z]{1,2}\d[A-Z\d]?\s\d[A-Z]{2}\b/;
-   if (strictUKpat.test(bodyText) && !hasUSPhone) return { code: 'GB', name: 'United Kingdom', confidence: 'medium' };
-
-   // Priority 11: Currency symbols (only on clean body text)
-   if (/\bCAD\b|\$\s*CAD/i.test(bodyText)) return { code: 'CA', name: 'Canada', confidence: 'low' };
-   if (/£\s*\d/.test(bodyText) && !hasUSPhone) return { code: 'GB', name: 'United Kingdom', confidence: 'low' };
-   if (/A\$\s*\d|\bAUD\b/.test(bodyText)) return { code: 'AU', name: 'Australia', confidence: 'low' };
-   if (/€\s*\d|\bEUR\b/.test(bodyText)) return { code: 'EU', name: 'Europe', confidence: 'low' };
-
-   // Priority 12: If any US phone pattern exists at all, weak US signal
-   if (hasUSPhone) return { code: 'US', name: 'United States', confidence: 'low' };
-
-   // Priority 13: Generic TLDs (.com/.net/.org) with US full state names → likely US
-   if (/\.(com|net|org)$/i.test(domain) && /\b(Florida|Texas|California|New York|Ohio|Georgia|Michigan|Illinois|Pennsylvania|North Carolina|Virginia|Arizona|Tennessee|Colorado|Washington)\b/i.test(bodyText)) {
-     return { code: 'US', name: 'United States', confidence: 'low' };
-   }
-
-   return { code: 'UNKNOWN', name: 'Unknown', confidence: 'none' };
-}
-
- // === DOMAIN AGE VIA RDAP / WHOIS ===
- 
- // Shared age calculator
- function calcDomainAge(result, createdDate) {
-   const created = new Date(createdDate);
-   if (isNaN(created.getTime())) return false;
-   result.createdDate = createdDate;
-   result.ageInDays = Math.floor((Date.now() - created) / 86400000);
-   const years  = Math.floor(result.ageInDays / 365);
-   const months = Math.floor((result.ageInDays % 365) / 30);
-   if (years > 0 && months > 0) result.ageText = `${years}Y ${months}M`;
-   else if (years > 0)          result.ageText = `${years}Y`;
-   else if (months > 0)         result.ageText = `${months}M`;
-   else                         result.ageText = '0M';
-   return true;
- }
- 
- // Parse RDAP response object into our result shape
- function parseRdapData(data, result) {
-   for (const ev of (data.events || [])) {
-     if (!ev.eventAction || !ev.eventDate) continue;
-     const action = ev.eventAction.toLowerCase().trim();
-     if (/^registr|^creat/.test(action)) calcDomainAge(result, ev.eventDate);
-     else if (action.includes('expir'))   result.expiresDate  = ev.eventDate;
-     else if (action.includes('last') || action.includes('updat') || action.includes('chang')) result.updatedDate = ev.eventDate;
-   }
-
-  // Some RDAP providers return creation date as top-level fields instead of events
-  if (!result.createdDate) {
-    const directCreated = data?.creationDate || data?.createdDate || data?.registrationDate;
-    if (directCreated) calcDomainAge(result, directCreated);
-  }
-
-   for (const entity of (data.entities || [])) {
-     if (!result.registrar && entity.roles?.includes('registrar') && entity.vcardArray) {
-       for (const field of (entity.vcardArray[1] || [])) {
-         if (field[0] === 'fn' && field[3]) { result.registrar = field[3]; break; }
-       }
-     }
-   }
- }
- 
- async function getDomainAge(domain) {
-  const result = {
-    createdDate: null,
-    updatedDate: null,
-    expiresDate: null,
-    ageInDays: null,
-    ageText: null,
-    registrar: null,
-    error: null,
-    attempts: []
-  };
-
-  const tld = domain.split('.').pop().toLowerCase();
-
-  // ── TLD → RDAP endpoint map (direct registry, no intermediary) ──
-  const RDAP_ENDPOINTS = {
-    com:  'https://rdap.verisign.com/com/v1/domain/',
-    net:  'https://rdap.verisign.com/net/v1/domain/',
-    org:  'https://rdap.publicinterestregistry.org/rdap/domain/',
-    info: 'https://rdap.afilias.net/rdap/info/domain/',
-    biz:  'https://rdap.nic.biz/domain/',
-    io:   'https://rdap.nic.io/domain/',
-    co:   'https://rdap.nic.co/domain/',
-    ai:   'https://rdap.nic.ai/domain/',
-    app:  'https://rdap.nic.google/domain/'
-  };
-
-  // ── Helper: try RDAP endpoint ──
-  async function tryRdap(name, url) {
+  for (const url of sources) {
     try {
       const r = await axios.get(url, {
         timeout: 8000,
+        headers: { Accept: 'application/rdap+json, application/json' },
         validateStatus: s => s === 200,
-        headers: {
-          Accept: 'application/rdap+json, application/json',
-          'User-Agent': 'Mozilla/5.0 DomainChecker/1.0'
-        }
       });
-
-      if (r.data?.events?.length) {
-        result.attempts.push({ source: name, status: 'ok' });
-        return r.data;
-      }
-
-      result.attempts.push({
-        source: name,
-        status: 'no-events',
-        keys: Object.keys(r.data || {}).slice(0, 5).join(',')
-      });
-
-    } catch (e) {
-      result.attempts.push({
-        source: name,
-        status: 'fail',
-        error: (e.code || e.message || 'unknown').substring(0, 80)
-      });
-    }
-
-    return null;
+      const parsed = parseRdap(r.data);
+      if (parsed) return parsed;
+    } catch { /* try next */ }
   }
- 
-   // Helper: try a WHOIS JSON API
-   async function tryWhois(name, url, extract) {
-     try {
-       const r = await axios.get(url, {
-         timeout: 8000,
-         validateStatus: s => s === 200,
-         headers: { Accept: 'application/json', 'User-Agent': 'Mozilla/5.0 DomainChecker/1.0' }
-       });
-       const raw = extract(r.data);
-      const firstDate = (value) => {
-        if (!value) return null;
-        if (Array.isArray(value)) {
-          for (const v of value) {
-            const d = firstDate(v);
-            if (d) return d;
-          }
-          return null;
-        }
-        if (typeof value === 'string') return value;
-        if (typeof value === 'object') return value.date || value.value || value.timestamp || value.created || null;
-        return null;
-      };
-      const dateStr = firstDate(raw);
-       if (dateStr && calcDomainAge(result, dateStr)) {
-         result.registrar = result.registrar || extractRegistrar(r.data) || null;
-         result.attempts.push({ source: name, status: 'ok' });
-         return true;
-       }
-       result.attempts.push({ source: name, status: 'no-date', sample: JSON.stringify(r.data).substring(0,120) });
-     } catch(e) {
-       result.attempts.push({ source: name, status: 'fail', error: (e.code || e.message || 'unknown').substring(0,80) });
-     }
-     return false;
-   }
- 
-   function extractRegistrar(d) {
-     if (!d) return null;
-     if (typeof d?.registrar === 'string') return d.registrar;
-     if (d?.registrar?.name) return d.registrar.name;
-     if (d?.WhoisRecord?.registrarName) return d.WhoisRecord.registrarName;
-     if (d?.registrar_name) return d.registrar_name;
-     return null;
-   }
- 
-   // ── ATTEMPT 1: Direct TLD registry RDAP (most reliable, authoritative) ──
-   const directEndpoint = RDAP_ENDPOINTS[tld];
-   if (directEndpoint) {
-     const data = await tryRdap(`rdap-${tld}`, `${directEndpoint}${domain}`);
-     if (data) parseRdapData(data, result);
-     if (result.createdDate) return result;
-   }
- 
-   // ── ATTEMPT 2: RDAP.cloud — community proxy, works from datacenter IPs ──
-   const rdapCloud = await tryRdap('rdap.cloud', `https://rdap.cloud/domain/${domain}`);
-   if (rdapCloud) parseRdapData(rdapCloud, result);
-   if (result.createdDate) return result;
- 
-   // ── ATTEMPT 3: rdap.net — open community RDAP proxy ──
-   const rdapNet = await tryRdap('rdap.net', `https://rdap.net/domain/${domain}`);
-   if (rdapNet) parseRdapData(rdapNet, result);
-   if (result.createdDate) return result;
- 
-   // ── ATTEMPT 4: shreshtait.com — truly unlimited, no auth, no daily cap ──
-   // Community WHOIS API: https://domaininfo.shreshtait.com/api/search/{domain}
-   // Returns: { creation_date, domain_name, registrar } — clean and simple
-   const shreshtait = await tryWhois('shreshtait', `https://domaininfo.shreshtait.com/api/search/${domain}`, d =>
-     d?.creation_date
-   );
-   if (shreshtait) return result;
- 
-   // ── ATTEMPT 5: who-dat.as93.net — open source, no auth, no stated limit ──
-   const whoDat = await tryWhois('who-dat', `https://who-dat.as93.net/${domain}`, d => {
-     const inner = d?.domain || d;
-    return inner?.created_date || inner?.creation_date || inner?.createdDate || inner?.creationDate || inner?.registered;
-   });
-   if (whoDat) return result;
- 
-   // ── ATTEMPT 6: domainsdb.info — last resort ──
-   try {
-     const r = await axios.get(`https://api.domainsdb.info/v1/domains/search?domain=${domain}&zone=${tld}`, {
-       timeout: 8000, validateStatus: s => s === 200, headers: { 'User-Agent': 'Mozilla/5.0 DomainChecker/1.0' }
-     });
-     const match = (r.data?.domains||[]).find(d => d.domain?.toLowerCase() === domain.toLowerCase());
-     if (match?.create_date && calcDomainAge(result, match.create_date)) {
-       result.attempts.push({ source: 'domainsdb', status: 'ok' });
-       return result;
-     }
-     result.attempts.push({ source: 'domainsdb', status: 'no-match', total: r.data?.domains?.length || 0 });
-   } catch(e) {
-     result.attempts.push({ source: 'domainsdb', status: 'fail', error: (e.code||e.message||'').substring(0,80) });
-   }
- 
-   result.error = `All ${result.attempts.length} domain age lookups failed — diagnose at /api/debug-domain-age?domain=${domain}`;
-   return result;
- }
- 
- 
-function buildBusinessStrengthSignals({ businessName, phones, emails, address, schema, metaDescription, socialSignals }) {
-  const normalizedName = (businessName || '').trim();
-  const hasBusinessName = normalizedName.length >= 3 && !isBoilerplateName(normalizedName);
-  const hasPhone = Array.isArray(phones) && phones.length > 0;
-  const hasEmail = Array.isArray(emails) && emails.length > 0;
-  const hasStreetAddress = !!(address?.street && address.street.trim().length > 5);
-  const hasLocality = !!(address?.city || address?.state || address?.zip);
-  const hasSchemaName = !!schema?.hasSchema;
-  const hasMetaDescription = !!(metaDescription && metaDescription.length > 20);
-  const hasSocialPresence = Array.isArray(socialSignals) && socialSignals.length > 0;
-  const socialCount = Array.isArray(socialSignals) ? socialSignals.length : 0;
-
-  const points =
-    (hasBusinessName ? 25 : 0) +
-    (hasPhone ? 18 : 0) +
-    (hasEmail ? 17 : 0) +
-    (hasStreetAddress ? 13 : 0) +
-    (hasLocality ? 5 : 0) +
-    (hasSchemaName ? 5 : 0) +
-    (hasMetaDescription ? 5 : 0) +
-    (hasSocialPresence ? Math.min(12, socialCount * 4) : 0);
-
-  const score = Math.max(0, Math.min(100, points));
-  let confidence = 'low';
-  if (score >= 75) confidence = 'high';
-  else if (score >= 45) confidence = 'medium';
-
-  return {
-    score,
-    confidence,
-    signals: {
-      hasBusinessName,
-      hasPhone,
-      hasEmail,
-      hasStreetAddress,
-      hasLocality,
-      hasSchemaName,
-      hasMetaDescription,
-      hasSocialPresence,
-      socialCount,
-    },
-  };
+  return empty;
 }
 
-// === CHEERIO-BASED BUSINESS NAME EXTRACTION ===
-// Uses cheerio for reliable DOM parsing with priority:
-//   1. Schema.org JSON-LD (legalName/name)
-//   2. og:site_name
-//   3. itemprop="name"
-//   4. Cleaned <title> tag
-function extractBusinessNameCheerio(html) {
-  const $ = cheerio.load(html || '');
-  const boilerplateEdge = /^(Home|Welcome|Welcome to|Index)\b\s*[-–—:|]?\s*|\s*[-–—:|]?\s*\b(Home|Welcome|Index)$/gi;
-  const cleanBizName = (s) => {
-    if (!s) return s;
-    let n = s.replace(/\s+/g, ' ').trim();
-    n = n.replace(boilerplateEdge, '').trim();
-    n = n.replace(/^\s*[-–—:|]+\s*|\s*[-–—:|]+\s*$/g, '').trim();
-    return n;
-  };
+// ─── Python Extractor ────────────────────────────────────────────────────────
 
-  // Priority 1: og:site_name (usually the cleanest brand name)
-  let bizName = $('meta[property="og:site_name"]').attr('content');
-  if (bizName) {
-    bizName = cleanBizName(bizName);
-    if (bizName && bizName.length > 2 && bizName.length < 80 && !isBoilerplateName(bizName)) {
-      return { name: bizName, source: 'og:site_name', confidence: 88 };
-    }
-  }
-
-  // Priority 2: JSON-LD Schema.org LocalBusiness
-  $('script[type="application/ld+json"]').each(function () {
-    if (bizName) return;
-    try {
-      const data = JSON.parse($(this).html() || '{}');
-      const items = Array.isArray(data) ? data : data['@graph'] ? data['@graph'] : [data];
-      for (const item of items) {
-        const typeStr = Array.isArray(item['@type']) ? item['@type'].join(' ') : String(item['@type'] || '');
-        if (/localbusiness|organization|corporation/i.test(typeStr)) {
-          const name = cleanBizName(item.legalName || item.name || '');
-          if (name && name.length > 2 && name.length < 80 && !isBoilerplateName(name)) {
-            bizName = name;
-            return false; // break .each
-          }
-        }
-      }
-    } catch {}
-  });
-  if (bizName) return { name: bizName, source: 'schema_jsonld', confidence: 95 };
-
-  // Priority 3: itemprop="name"
-  const itempropEl = $('[itemprop="name"]').first();
-  if (itempropEl.length) {
-    const name = cleanBizName(itempropEl.text() || itempropEl.attr('content') || '');
-    if (name && name.length > 2 && name.length < 80 && !isBoilerplateName(name)) {
-      return { name, source: 'itemprop_name', confidence: 85 };
-    }
-  }
-
-  // Priority 4: Title tag (cleaned)
-  const titleText = $('title').text();
-  if (titleText) {
-    let name = titleText.split('|')[0].split('-')[0].split('–')[0].split('—')[0].trim();
-    name = cleanBizName(name);
-    // Reject very short single-word names from title (e.g. "New", "Home", "Site")
-    const isTooShort = name && name.length < 5 && !name.includes(' ');
-    if (name && name.length > 2 && name.length < 80 && !isTooShort && !isBoilerplateName(name)) {
-      return { name, source: 'title', confidence: 70 };
-    }
-  }
-
-  return null;
-}
-
-async function extractBusinessInfo(html, domain) {
-   const bodyText = html
-     .replace(/<script[\s\S]*?<\/script>/gi, '')
-     .replace(/<style[\s\S]*?<\/style>/gi, '')
-     .replace(/<[^>]+>/g, ' ')
-     .replace(/&[a-z]+;/gi, ' ')
-     .replace(/\s+/g, ' ')
-     .trim();
-
-   // 1. Schema.org JSON-LD (most structured data source)
-   const schema = extractSchemaOrg(html);
-
-   // 1b. Social signals extraction
-   const socialSignals = extractSocialSignals(html, schema);
-
-   // 1c. Structured address extraction (microdata, hCard, <address>, footer, labeled patterns)
-   const structuredAddresses = extractStructuredAddress(html);
-
-   // 1d. Enhanced business name sources (logo alt, aria-label, meta, itemprop, copyright)
-   const enhancedNames = extractEnhancedBusinessName(html);
-
-   // 1e. Cheerio-based name extraction (clean DOM parsing with priority)
-   const cheerioName = extractBusinessNameCheerio(html);
-
-   // 2. Open Graph meta tags
-   const og = extractOGMeta(html);
-
-   // 3. Title tag
-   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-   const rawTitle = titleMatch ? decodeHTML(titleMatch[1].trim().replace(/\s+/g, ' ')) : null;
-
-   // 4. Decode schema/OG values
-   const cleanSchemaName = schema.name ? decodeHTML(schema.name) : null;
-   const cleanOGSiteName = og.siteName ? decodeHTML(og.siteName) : null;
-
-  // 4b. Address init + schema address parsing
-  let address = { street:'', city:'', state:'', zip:'' };
-   if (schema.address) {
-     if (schema.address.street || schema.address.city) {
-       address = {
-         street: schema.address.street || '',
-         city: schema.address.city || '',
-         state: schema.address.state || '',
-         zip: schema.address.zip ? String(schema.address.zip) : ''
-       };
-     } else if (schema.address.raw) {
-       address = parseUSAddress(schema.address.raw);
-     }
-   }
- 
-   // 5. Footer/Copyright extraction for business name
-   let footerName = null;
-   const footerMatch = html.match(/<footer[\s\S]*?<\/footer>/i);
-   if (footerMatch) {
-     const footerText = footerMatch[0]
-       .replace(/<[^>]+>/g, ' ')
-       .replace(/&[a-z]+;/gi, ' ')
-       .replace(/\s+/g, ' ');
-     const copyMatch = footerText.match(
-       /(?:©|copyright)\s*(?:\d{4}\s*[-–]?\s*\d{0,4}\s*)?([A-Z][A-Za-z\s&'.,-]+?)(?:\s*[.|]|\s*All\s+Rights|\s*$)/i
-     );
-     if (copyMatch && copyMatch[1]) {
-       let fn = copyMatch[1].trim().replace(/[.,]+$/, '').trim();
-       if (
-         fn.length > 3 &&
-         fn.length < 80 &&
-         !/all rights|privacy|terms|powered by|built with|designed by/i.test(fn)
-       ) {
-         footerName = fn;
-       }
-     }
-   }
- 
-  // Extra signal: first H1 often contains the actual business name
-  const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-  const cleanH1 = h1Match ? decodeHTML(h1Match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()) : null;
-
-   // 6. Business name (cleaned) — now includes footer as a source
-   let businessName = cleanBusinessName(rawTitle, cleanOGSiteName, cleanSchemaName, domain, footerName);
-
-   // 6b. If cheerio-based extraction found a high-confidence name, prefer it
-   if (cheerioName && cheerioName.confidence >= 85 && cheerioName.name && !isBoilerplateName(cheerioName.name)) {
-     businessName = normalizeExtractedBusinessName(cheerioName.name);
-   }
-
-  // Helper: count how many domain keywords appear in a string
-  const domRaw = domain.replace(/\.(com|net|org|info|biz|co|us|io|store|art|inc|godaddysites\.com)$/i, '');
-  // Extract domain words: split on hyphens, dots, digit-letter boundaries, and camelCase
-  const domWords = [];
-  domRaw.split(/[-_.]/).forEach(part => {
-    // Split at digit-to-letter and letter-to-digit boundaries: "4bjunk" → "4b", "junk"
-    // Also split camelCase: "bigMike" → "big", "Mike"
-    const subparts = part
-      .replace(/(\d)([a-zA-Z])/g, '$1 $2')   // "4bjunk" → "4b junk"
-      .replace(/([a-z])([A-Z])/g, '$1 $2')   // "bigMike" → "big Mike"
-      .split(/\s+/);
-    subparts.forEach(sp => {
-      const clean = sp.replace(/\d+/g, '');   // strip digits: "4b" → "b" (too short, filtered below)
-      if (clean.length > 2) domWords.push(clean.toLowerCase());
-      if (sp.length > 2) domWords.push(sp.toLowerCase());  // also keep with digits: "14k"
-      // Extra: if word starts with a single letter prefix + 3+ letter word, extract the inner word
-      // "bjunk" → "junk", "bservices" → "services"
-      if (clean.length > 3) {
-        const innerWord = clean.substring(1);  // strip single leading letter
-        if (innerWord.length > 2) domWords.push(innerWord.toLowerCase());
-      }
+function runPython(html, url, domain) {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(null), 35000);
+    const py = spawn(PY_CMD, [path.join(__dirname, 'extractor.py')]);
+    let out = '', err = '';
+    py.stdout.on('data', d => out += d);
+    py.stderr.on('data', d => err += d);
+    py.on('close', () => {
+      clearTimeout(timer);
+      try { resolve(JSON.parse(out)); } catch { resolve(null); }
     });
+    py.on('error', () => { clearTimeout(timer); resolve(null); });
+    py.stdin.write(JSON.stringify({ html, url, domain }));
+    py.stdin.end();
   });
-  // Deduplicate
-  const uniqueDomWords = [...new Set(domWords)];
-
-  const countDomainOverlap = (str) => {
-    if (!str || uniqueDomWords.length === 0) return 0;
-    const sl = str.toLowerCase();
-    return uniqueDomWords.filter(dw => dw.length > 2 && sl.includes(dw)).length;
-  };
-
-  const looksLikeWeakName = (n) => {
-    if (!n) return true;
-    const t = n.trim();
-    return (
-      t.length < 4 ||
-      /^home$/i.test(t) ||
-      /^(new|old|best|top|free|site|page|main|test|info|web|app|start|next|now|more)$/i.test(t) ||
-      /^(welcome|contact|about|services?|our services|our team|our work|my blog|blog|portfolio|gallery)$/i.test(t) ||
-      /^(my|our)\s+(wordpress|blog|site|website|page)/i.test(t) ||
-      /\.(com|net|org|info|biz|edu)$/i.test(t) ||
-      t.toLowerCase() === domain.toLowerCase() ||
-      // Names that look like scraped nav/menu items
-      /^(current|class|schedule|catalog|enrollment|registration|news|events|programs|departments)\b/i.test(t) ||
-      // Names that are just a concatenation of service keywords
-      /^(economic|research|development|enrollment|management|administration)\s+(research|development|center|management|office)\b/i.test(t)
-    );
-  };
-
-  // If cleanBusinessName returned a name with ZERO domain overlap, check if H1 is better
-  const nameOverlap = countDomainOverlap(businessName);
-  const h1Overlap = countDomainOverlap(cleanH1);
-  if (nameOverlap === 0 && h1Overlap > 0 && cleanH1 && cleanH1.length > 2 && cleanH1.length < 90 && !isBoilerplateName(cleanH1)) {
-    businessName = cleanH1;
-  }
-
-  // Also fall back to H1 if name looks weak
-  if (looksLikeWeakName(businessName) && cleanH1 && cleanH1.length > 2 && cleanH1.length < 90 && !isBoilerplateName(cleanH1)) {
-    businessName = cleanH1;
-  }
-
-  // Enhanced name sources: logo alt, itemprop, copyright, aria-label, meta app-name
-  // Use schema legalName as a high-priority source
-  if (schema.legalName && !isBoilerplateName(schema.legalName) && schema.legalName.length > 2 && schema.legalName.length < 80) {
-    const legalOverlap = countDomainOverlap(schema.legalName);
-    const currentOverlap = countDomainOverlap(businessName);
-    if (legalOverlap > currentOverlap || looksLikeWeakName(businessName)) {
-      businessName = normalizeExtractedBusinessName(schema.legalName);
-    }
-  }
-
-  // Try enhanced name candidates when current name is weak or has no domain overlap
-  if (looksLikeWeakName(businessName) || countDomainOverlap(businessName) === 0 || businessName === domain) {
-    // Sort by priority descending
-    const sortedCandidates = enhancedNames
-      .filter(c => c.name && c.name.length > 2 && c.name.length < 80 && !isBoilerplateName(c.name))
-      .sort((a, b) => b.priority - a.priority);
-
-    for (const candidate of sortedCandidates) {
-      const cOverlap = countDomainOverlap(candidate.name);
-      const currentOverlap = countDomainOverlap(businessName);
-      // Prefer candidates with domain overlap or legal entity suffixes
-      const hasLegalSuffix = /\b(?:LLC|Inc\.?|Corp\.?|Corporation|Ltd|Company|Co\.?|Group|Partners|Associates|Enterprises?)\b/i.test(candidate.name);
-      if (cOverlap > currentOverlap || (hasLegalSuffix && cOverlap >= currentOverlap) || looksLikeWeakName(businessName)) {
-        businessName = normalizeExtractedBusinessName(candidate.name);
-        break;
-      }
-    }
-  }
-
-   // Fallback: if cleanBusinessName returned nothing, use the domain
-   if (!businessName || businessName.trim().length === 0) {
-     businessName = domain;
-   }
- 
-   // 7. Contact info
-   const contact = extractContactInfo(html, bodyText);
-
-   // Merge schema phone/email (JSON-LD is highly structured — trust it)
-   if (schema.phone) {
-     const schemaDigits = schema.phone.replace(/\D/g, '');
-     if (!contact.phones.some(p => p.replace(/\D/g, '') === schemaDigits)) contact.phones.unshift(schema.phone);
-   }
-   if (schema.email) {
-     const se = schema.email.toLowerCase();
-     if (!contact.emails.includes(se)) contact.emails.unshift(se);
-   }
-   // Filter filler/placeholder emails
-   contact.emails = contact.emails.filter(e => !/filler@|noreply@|no-reply@|donotreply@|placeholder/i.test(e));
- 
-   // Strong fallback: detect business name from contact block or body
-// Also trigger when name looks like a domain slug (no spaces = camelCase/concatenated)
-// Also trigger when current name has ZERO overlap with domain keywords
-const nameIsSlug = businessName && !businessName.includes(' ') && businessName.length > 6;
-const currentNameOverlap = countDomainOverlap(businessName);
-
-if (!businessName || businessName.length < 5 || businessName.toLowerCase() === domain.toLowerCase() || nameIsSlug || currentNameOverlap === 0) {
-
-  // Scan all matches, pick the shortest clean one (avoids grabbing repeated carousel text)
-  const nameRegex = /([A-Z][A-Za-z0-9&'.]{0,40}(?:[ \t]+[A-Za-z0-9&'.]+){0,6}[ \t]+(?:LLC|Inc\.?|Corp\.?|Corporation|Company|Services?|Solutions?|Repair|Removal|Junk\s+Removal|Plumbing|Mechanical|Management|Systems|Associates|Group|Partners|Enterprises?|Construction|Restoration|Properties|Realty|Holdings|Builders?|Hauling|Disposal|Electric(?:al)?|Roofing|Heating|Cooling|Landscaping|Painting|Contracting|Agency|Consulting|Studio|Design|Media|Logistics|Moving|Storage|Cleaning|Flooring|Paving|Fencing|Welding|Towing|Auto|Dental|Legal|Financial|Insurance|Advisors?|Interiors?|Exteriors?|Renovations?|Inspections?|Demolition|Excavat(?:ing|ion)|University|College|Institute|Academy|School|Seminary|Polytechnic|Center|Centre|Foundation|Hospital|Clinic|Church|Ministry|Ministries|Museum|Library|Laboratory|Labs?)(?:[ \t]+LLC|\.?)?)/g;
-
-  let nameCandidate = null;
-  let bestCandidateScore = -1;
-  let nm;
-
-  while ((nm = nameRegex.exec(bodyText)) !== null) {
-    const candidate = normalizeExtractedBusinessName(nm[0].trim().replace(/\s+/g, ' '));
-
-    // Skip if it contains obvious repetition (same word appears 3+ times)
-    const words = candidate.toLowerCase().split(/\s+/);
-    const wordCounts = {};
-    words.forEach(w => { wordCounts[w] = (wordCounts[w] || 0) + 1; });
-    const maxRepeat = Math.max(...Object.values(wordCounts));
-
-    if (maxRepeat >= 3) continue;
-
-    // Skip candidates that look like page content/navigation/menu items
-    // e.g., "Current Class Schedules College Catalog Class Schedule Services"
-    if (/\b(schedule|catalog|current|class|syllabus|curriculum|registration|enrollment|calendar|semester|tuition|financial aid)\b/i.test(candidate) && !/\b(University|College|Institute|Academy|School)\b/i.test(candidate)) continue;
-    // Skip menu-like concatenated labels (multiple distinct service words without a proper name)
-    const serviceWordCount = (candidate.match(/\b(services?|solutions?|products?|features?|resources?|information|directory|portal|support|help|news|events?|programs?|departments?)\b/gi) || []).length;
-    if (serviceWordCount >= 2) continue;
-
-    if (candidate.length > 5 && candidate.length < 80 && !isBoilerplateName(candidate)) {
-      // Score: domain overlap is most important, then prefer LONGER names (full business name)
-      // Then prefer names with more capitalized words (proper noun signal)
-      const overlap = countDomainOverlap(candidate);
-      const hasLegalEntity = typeof candidate === 'string' && /\b(?:LLC|Inc\.?|Corp\.?|Corporation|Ltd|Company)\b/i.test(candidate);
-      const hasInstitution = /\b(?:University|College|Institute|Academy|School|Seminary|Polytechnic|Hospital|Foundation)\b/i.test(candidate);
-      if (overlap === 0 && !hasLegalEntity && !hasInstitution) continue;
-      const capWords = (candidate.match(/\b[A-Z][a-z]/g) || []).length;
-      let score = overlap * 100 + capWords * 5 + Math.min(candidate.length, 50);
-      // Boost institution names
-      if (hasInstitution) score += 30;
-      if (score > bestCandidateScore) {
-        nameCandidate = candidate;
-        bestCandidateScore = score;
-      }
-    }
-  }
-
-  if (nameCandidate) {
-    businessName = nameCandidate;
-  } else if (schema.address?.raw) {
-    address = parseUSAddress(schema.address.raw);
-  }
-}
- 
-   // If still no street found, scan body for "City, ST ZIP" pattern
-   if (!address.street) {
-     // Match 1-3 word city names immediately before state code + ZIP
-     // Anchored to word start to avoid "Repair LLC Sanford, NC" matching
-       const cityStateZipMatch = bodyText.match(/(?:^|[\n\r,.|]\s*)([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){0,2}),?\s*([A-Za-z]{2})\s*(\d{5})\b/m);
-     if (cityStateZipMatch) {
-       const candidateCity = cityStateZipMatch[1].trim();
-       const candidateState = cityStateZipMatch[2].toUpperCase();
-       const candidateZip = cityStateZipMatch[3];
-       // Must not contain business-name words, and state must be a valid US state code
-       const notACity = /LLC|Inc|Corp|Repair|Service|Plumbing|Mechanical|Management|Company|Group|Associates|Home|Commercial|Residential|the|and|for|your|this|terms|privacy|rights|contact|email|phone|subscribe|newsletter|sign\s*up/i;
-       if (!notACity.test(candidateCity) && candidateCity.length >= 3 && candidateCity.length <= 40 && US_STATE_CODES.includes(candidateState)) {
-         if (!address.city) address.city = candidateCity;
-         if (!address.state) address.state = candidateState;
-         if (!address.zip) address.zip = candidateZip;
-       }
-     }
-     // Also handle full state name: "Auburn, Maine 04210"
-     if (!address.city) {
-         const fullStateMatch = bodyText.match(/(?:^|[\n\r,.|]\s*)([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){0,2}),?\s*([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+)?)\s+(\d{5})\b/m);
-       if (fullStateMatch) {
-         const stateNameRaw = fullStateMatch[2].trim();
-         const stateCode = Object.entries(US_STATES).find(([,name]) => name.toLowerCase() === stateNameRaw.toLowerCase())?.[0];
-         if (stateCode) {
-           address.city  = fullStateMatch[1].trim();
-           address.state = stateCode;
-           address.zip   = fullStateMatch[3];
-         }
-       }
-     }
-
-    // Handle city/state without ZIP: "Austin, TX"
-    if (!address.city) {
-        const cityStateOnlyMatch = bodyText.match(/(?:^|[\n\r,.|]\s*)([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){0,2}),?\s*([A-Za-z]{2})\b/m);
-      if (cityStateOnlyMatch) {
-        const candidateCity = cityStateOnlyMatch[1].trim();
-        const candidateState = cityStateOnlyMatch[2].toUpperCase();
-        const notACity = /LLC|Inc|Corp|Repair|Service|Plumbing|Mechanical|Management|Company|the|and|for|your|this|terms|privacy|rights|contact|email|phone/i;
-        if (!notACity.test(candidateCity) && candidateCity.length >= 3 && candidateCity.length <= 40 && US_STATE_CODES.includes(candidateState)) {
-          address.city = candidateCity;
-          address.state = candidateState;
-        }
-      }
-    }
-   }
- 
-   // --- Street address extraction: strict regex to prevent bleed into business name ---
-     const addrMatch = bodyText.match(
-    /(?:^|[\n\r\s])(\d{1,6}\s+[A-Za-z][A-Za-z0-9\s.#'&/,-]{1,85}?\s+(?:Street|St\.?|Avenue|Ave\.?|Boulevard|Blvd\.?|Drive|Dr\.?|Road|Rd\.?|Lane|Ln\.?|Way|Court|Ct\.?|Place|Pl\.?|Circle|Cir\.?|Trail|Trl\.?|Parkway|Pkwy\.?|Highway|Hwy\.?|Terrace|Ter\.?|Pike)\.?(?:,?\s+(?:Suite|Ste\.?|Bldg\.?|Building|Unit|Apt\.?|Floor|Fl\.?)\s*[#]?[A-Za-z0-9-]+)?)(?:,?\s*[A-Za-z][A-Za-z\s.'-]{1,40},?\s*[A-Za-z]{2}\s*\d{5}(?:-\d{4})?)?/im
-  );
-  if (addrMatch) {
-    const rawMatch = (addrMatch[0] || '').substring(0, 200).trim();
-    const parsed = parseUSAddress(rawMatch);
- 
-     // Sanitize street: strip business name suffixes that bleed AFTER the street address
-     if (parsed.street) {
-       parsed.street = parsed.street
-         .replace(/\s{2,}/g, ' ')
-         .replace(/^((?:\S+\s+){4,})(?:LLC|Inc\.?|Corp\.?|Co\.?|Ltd\.?|Company|Services?|Repair|Plumbing|Mechanical)\b.*/i, '$1')
-         .trim();
-     }
- 
-     // Reject street if it looks like body text, not an address:
-     // Real streets: "1010 S Park Loop Road", "194 Merrow Road", "1801 N. Opdyke Rd."
-     // Body text: "21 years of service with the United", "10 reasons why our..."
-     // Guard: after the number, if 3rd+ token is a common English article/preposition → reject
-     if (parsed.street) {
-       const streetWords = parsed.street.split(/\s+/);
-       const nonAddrWords = /^(of|with|the|for|and|or|but|why|how|when|what|that|this|to|in|on|at|by|from|years|days|months|reasons|ways|steps|things|tips|over|under|more|less|than|our|your|we|us|my|their|its|has|have|was|were|is|are|been|will|can|not|no|new|old|about|after|before|since|until|while|where|which)$/i;
-
-          if (streetWords.length >= 3 && nonAddrWords.test(streetWords[2])) {
-        parsed.street = '';
-      }
-    }
-
-    const validStates = new Set([
-      'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA',
-      'ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK',
-      'OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'
-    ]);
-
-    if (parsed.state && validStates.has(parsed.state)) {
-      // Only fill in missing fields — don't overwrite good schema-based data
-      if (!address.street && parsed.street) address.street = parsed.street;
-      if (!address.city && parsed.city) address.city = parsed.city;
-      if (!address.state && parsed.state) address.state = parsed.state;
-      if (!address.zip && parsed.zip) address.zip = parsed.zip;
-    } else if (parsed.street && !address.street) {
-      address.street = parsed.street;
-    }
-  }
-
-  // Structured address fallback: use microdata, hCard, <address>, footer, labeled patterns
-  if (!address.street && structuredAddresses.length > 0) {
-    for (const sa of structuredAddresses) {
-      if (sa.raw) {
-        const parsed = parseUSAddress(sa.raw);
-        if (parsed.street && parsed.street.length > 5) {
-          // Validate: reject body-text false positives
-          const streetWords = parsed.street.split(/\s+/);
-          const nonAddrWords = /^(of|with|the|for|and|or|but|why|how|when|what|that|this|to|in|on|at|by|from|years|days|months|reasons|ways|steps|things|tips|over|under|more|less|than|our|your|we|us|my|their)$/i;
-          if (streetWords.length < 3 || !nonAddrWords.test(streetWords[2])) {
-            if (!address.street) address.street = parsed.street;
-            if (!address.city && parsed.city) address.city = parsed.city;
-            if (!address.state && parsed.state) address.state = parsed.state;
-            if (!address.zip && parsed.zip) address.zip = parsed.zip;
-            break;
-          }
-        }
-      } else if (sa.street || sa.city) {
-        // Structured fields from microdata/hCard
-        if (!address.street && sa.street) address.street = sa.street;
-        if (!address.city && sa.city) address.city = sa.city;
-        if (!address.state && sa.state) address.state = sa.state;
-        if (!address.zip && sa.zip) address.zip = sa.zip ? String(sa.zip) : '';
-        break;
-      }
-    }
-  }
-
-  // Fill in missing city/state/zip from structured sources even if we have a street
-  if (address.street && (!address.city || !address.state)) {
-    for (const sa of structuredAddresses) {
-      if (sa.city && !address.city) address.city = sa.city;
-      if (sa.state && !address.state) address.state = sa.state;
-      if (sa.zip && !address.zip) address.zip = String(sa.zip);
-    }
-  }
-
-  // Ensure ZIP preserves leading zeros
-  if (address.zip && /^\d{4}$/.test(address.zip)) address.zip = '0' + address.zip;
-
-  // 10. Country detection
-  const country = detectCountry(html, domain, schema.address, contact.phones);
-
-  // 11. Meta description
-  const metaDescMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([\s\S]*?)["']/i);
-  const metaDescription = metaDescMatch
-    ? decodeHTML(metaDescMatch[1].trim())
-    : og.description
-    ? decodeHTML(og.description)
-    : schema.description
-    ? decodeHTML(schema.description)
-    : null;
-
-  // 12. Business type/industry from schema
-  const businessType = schema.type || null;
-
-  // === FINAL NAME SANITIZATION ===
-  // Strip trailing em-dash/en-dash content, taglines, and descriptive phrases
-  if (businessName && businessName !== domain) {
-    // "Genesee Community College—ANTI-TERRESTRIAL" → "Genesee Community College"
-    businessName = businessName.replace(/\s*[—–]\s*[A-Z][A-Za-z\s\-]{2,}$/, '').trim();
-    // "ASU engineering-driven health innovations improving lives" → "ASU"
-    // Only strip if the trailing part is lowercase generic words (not proper nouns like "New York")
-    businessName = businessName.replace(/\s+[a-z][a-z\s\-]{15,}$/i, (match) => {
-      // Keep it if it looks like a proper name part (e.g., " of Arkansas at Pine Bluff")
-      if (/\b(of|at|in|for|and|the)\s+[A-Z]/.test(match)) return match;
-      return '';
-    }).trim();
-    // Strip if name is excessively long (>60 chars) and has many words — likely scraped content
-    if (businessName.length > 60 && businessName.split(/\s+/).length > 8) {
-      // Try to find a natural break point
-      const shortened = businessName.replace(/\s+(Schedule|Catalog|Directory|Portal|Resources?|Information|Enrollment|Registration|Services?|TitleIX).*$/i, '').trim();
-      if (shortened.length > 3 && shortened.length < businessName.length) businessName = shortened;
-    }
-    // If name still has separator chars mid-name, take the first meaningful part
-    if (/[—–|]/.test(businessName) && businessName.length > 30) {
-      const parts = businessName.split(/\s*[—–|]\s*/).filter(p => p.length > 2);
-      if (parts.length >= 2) {
-        // Pick the part with the most domain overlap
-        let bestPart = parts[0];
-        let bestOverlap = countDomainOverlap(parts[0]);
-        for (let i = 1; i < parts.length; i++) {
-          const ov = countDomainOverlap(parts[i]);
-          if (ov > bestOverlap) { bestOverlap = ov; bestPart = parts[i]; }
-        }
-        businessName = bestPart;
-      }
-    }
-  }
-
-  const normalizedBusiness = {
-    businessName,
-    rawTitle,
-    metaDescription,
-    businessType,
-    phones: contact.phones.slice(0, 3),
-    emails: contact.emails.slice(0, 3),
-    address,
-    country,
-    schema: {
-      hasSchema: !!schema.name,
-      rating: schema.rating,
-      priceRange: schema.priceRange,
-      hours: schema.hours.length > 0 ? schema.hours : null,
-    },
-    og: { siteName: og.siteName, image: og.image },
-    socialSignals,
-  };
-
-  return {
-    ...normalizedBusiness,
-    strength: buildBusinessStrengthSignals(normalizedBusiness),
-  };
 }
 
-// === CONTACT PAGE FETCHER ===
-// Looks for a contact/about link in the homepage HTML and fetches it
-async function fetchContactPage(domain, homepageHtml) {
+// ─── Routes ─────────────────────────────────────────────────────────────────
+
+app.get('/api/health', (_, res) => res.json({ ok: true, version: '4.0' }));
+
+// ── Single domain analysis ──
+app.post('/api/analyze', async (req, res) => {
+  const domain = normalizeDomain(req.body?.domain || '');
+  if (!domain) return res.status(400).json({ error: 'domain required' });
+
   try {
-    // Known contact page slug patterns, in priority order
-    const contactSlugs = [
-      '/contact-us', '/contact', '/about-us', '/about',
-      '/find-us', '/find-me', '/location', '/locations',
-      '/get-in-touch', '/reach-us', '/our-location',
-      '/contact-real-estate', '/contact-information',
-      '/our-team', '/company', '/info', '/our-company',
-      '/office', '/directions', '/visit', '/visit-us',
-    ];
+    // DNS + HTTP in parallel, then SSL + domain age in parallel
+    const [dnsResult, httpResult] = await Promise.all([checkDns(domain), checkHttp(domain)]);
+    const [sslResult, domainAge]  = await Promise.all([checkSsl(domain), getDomainAge(domain)]);
 
-    // First: try to find a contact/about/location link directly in the homepage HTML
-    const linkMatches = homepageHtml.match(/href=["']([^"']*(?:contact|about|find|location|reach|visit|office|direction|company|team|info)[^"']{0,30})["']/gi) || [];
-    const foundSlugs = linkMatches
-      .map(m => { const hm = m.match(/href=["']([^"']+)["']/i); return hm ? hm[1] : null; })
-      .filter(h => h && h.startsWith('/') && h.length > 1 && h.length < 60)
-      .map(h => h.split('?')[0].split('#')[0]);  // strip query/hash
+    const $ = cheerio.load(httpResult.html || '');
 
-    // Deduplicate and combine: found links first, then known slugs
-    const toTry = [...new Set([...foundSlugs, ...contactSlugs])].slice(0, 8);
+    // Overall status
+    let overallStatus;
+    if (!dnsResult.hasARecord && !httpResult.isUp) overallStatus = 'DEAD';
+    else if (!httpResult.isUp) overallStatus = 'DOWN';
+    else overallStatus = detectStatus($, {
+      statusCode: httpResult.statusCode,
+      isUp: httpResult.isUp,
+      finalUrl: httpResult.finalUrl,
+      originalDomain: domain,
+    });
 
-    const hdrs = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+    const statusColors = {
+      ACTIVE: 'green', DEAD: 'red', DOWN: 'red', PARKED: 'orange',
+      COMING_SOON: 'yellow', NO_CONTENT: 'orange', DEFAULT_PAGE: 'orange',
+      SUSPENDED: 'red', SHELL_SITE: 'orange', CROSS_DOMAIN_REDIRECT: 'red',
+      BLOCKED: 'orange', ISSUES: 'yellow',
     };
 
-    for (const slug of toTry) {
-      try {
-        const url = `https://${domain}${slug}`;
-        const resp = await axios.get(url, { timeout: 8000, maxRedirects: 5, validateStatus: s => s === 200, headers: hdrs });
-        if (resp.data && typeof resp.data === 'string' && resp.data.length > 500) {
-          console.log(`  [CONTACT PAGE] fetched: ${slug}`);
-          return resp.data;
-        }
-      } catch {}
-    }
-  } catch {}
-  return null;
-}
-
-// === BUSINESS EXTRACTION ENDPOINT ===
-
-app.post('/api/extract-business', async (req, res) => {
-  const { domain: rawDomain } = req.body;
-  if (!rawDomain || rawDomain.trim().length === 0) return res.status(400).json({ error: 'Domain is required' });
-
-  const domain = normalizeDomain(rawDomain);
-  console.log(`\n[BIZ] ${domain}`);
-
-  // No cache — always return live results
-
-  try {
-    // Run DNS and HTTP fetch in parallel
-    const [dnsResults, httpResults] = await Promise.all([
-      analyzeDNS(domain),
-      analyzeHTTPStatus(domain)
-    ]);
-    const { result: httpStatus, html } = httpResults;
-
-    // Determine website status using same logic as analyze
-    const contentAnalysis = analyzeContent(html, domain, httpStatus.finalUrl);
-    let websiteStatus = 'UNKNOWN';
-
-    // Detect WAF/proxy blocks: 403 with empty or tiny non-HTML body like "Host not allowed", "Access Denied"
-    const isWAFBlock = httpStatus.isUp && httpStatus.statusCode === 403 && (
-      html.length === 0 ||
-      (html.length < 200 && !/<html/i.test(html) &&
-        /host not allowed|access denied|forbidden|blocked|not authorized/i.test(html)));
-
-    if (!dnsResults.hasARecord && !httpStatus.isUp) websiteStatus = 'DEAD';
-    else if (!httpStatus.isUp) websiteStatus = 'DOWN';
-    else if (isWAFBlock || contentAnalysis.verdict === 'BLOCKED') websiteStatus = 'BLOCKED';
-    else if (contentAnalysis.verdict === 'CROSS_DOMAIN_REDIRECT') websiteStatus = 'CROSS_DOMAIN_REDIRECT';
-    else if (contentAnalysis.verdict === 'PARKED') websiteStatus = 'PARKED';
-    else if (contentAnalysis.verdict === 'COMING_SOON') websiteStatus = 'COMING_SOON';
-    else if (contentAnalysis.verdict === 'SHELL_SITE') websiteStatus = 'SHELL_SITE';
-    else if (contentAnalysis.verdict === 'NO_CONTENT') websiteStatus = 'NO_CONTENT';
-    else if (contentAnalysis.verdict === 'DEFAULT_PAGE') websiteStatus = 'DEFAULT_PAGE';
-    else if (contentAnalysis.verdict === 'SUSPENDED') websiteStatus = 'SUSPENDED';
-    else if (contentAnalysis.verdict === 'POLITICAL_CAMPAIGN') websiteStatus = 'POLITICAL_CAMPAIGN';
-    else if (contentAnalysis.verdict === 'VALID' && ((httpStatus.statusCode >= 200 && httpStatus.statusCode < 400) || (httpStatus.statusCode === 403 && contentAnalysis.details.wordCount >= 100))) websiteStatus = 'ACTIVE';
-    else websiteStatus = 'ISSUES';
-
-    // If site is dead/down/suspended/blocked/no content, skip business extraction
-    if (['DEAD', 'DOWN', 'SUSPENDED', 'BLOCKED', 'NO_CONTENT', 'DEFAULT_PAGE'].includes(websiteStatus)) {
-      const reasons = websiteStatus === 'BLOCKED'
-        ? ['Website blocked automated access (WAF/proxy returned 403)']
-        : contentAnalysis.reasons;
-      return res.json({ domain, websiteStatus, reasons, business: { businessName: '', phones: [], emails: [], address: { street:'', city:'', state:'', zip:'' }, country: { code:'UNKNOWN', name:'Unknown', confidence:'none' }, metaDescription: null, businessType: null, socialSignals: [], strength: { score: 0, confidence: 'low', signals: { hasBusinessName:false, hasPhone:false, hasEmail:false, hasStreetAddress:false, hasLocality:false, hasSchemaName:false, hasMetaDescription:false, hasSocialPresence:false, socialCount:0 } } } });
-    }
-
-    let business = await extractBusinessInfo(html, domain);
-
-    // Run Python extraction and prefetch contact page in parallel — saves ~8s when contact page is needed
-    const [pythonExtraction, contactHtml] = await Promise.all([
-      extractBusinessWithPython(html, httpStatus.finalUrl || `https://${domain}`),
-      fetchContactPage(domain, html),
-    ]);
-
-    if (pythonExtraction?.ok && pythonExtraction.best) {
-      const py = pythonExtraction.best;
-      if (!business.businessName && py.business_name) business.businessName = py.business_name;
-      if (!business.address.street && py.street_address) business.address.street = py.street_address;
-      if (!business.address.city && py.city) business.address.city = py.city;
-      if (!business.address.state && py.state) business.address.state = py.state;
-      if (!business.address.zip && py.zip_code) business.address.zip = py.zip_code;
-      const pythonNameIsAuthoritative =
-        !!py.business_name &&
-        py.confidence_score >= 85 &&
-        !isBoilerplateName(py.business_name) &&
-        !looksLikeWeakName(py.business_name);
-      if (pythonNameIsAuthoritative) {
-        business.businessName = py.business_name;
-      }
-      console.log(`  [PY-EXTRACT] ok=${pythonExtraction.ok} fallback=${pythonExtraction.used_fallback ? 'yes' : 'no'} score=${py.confidence_score || 0} name_source=${pythonExtraction.best_name_source || 'none'}`);
-    } else {
-      console.log(`  [PY-EXTRACT] skipped: ${pythonExtraction?.error || 'unknown error'}`);
-    }
-
-    // Use prefetched contact page if key data is still missing
-    const needsContactPage = !business.address.street || business.phones.length === 0 || business.emails.length === 0;
-    if (needsContactPage && contactHtml) {
-      const contactBusiness = await extractBusinessInfo(contactHtml, domain);
-      const contactPythonExtraction = await extractBusinessWithPython(contactHtml, `https://${domain}`);
-      if (contactPythonExtraction?.ok && contactPythonExtraction.best) {
-        const cp = contactPythonExtraction.best;
-        if (!contactBusiness.businessName && cp.business_name) contactBusiness.businessName = cp.business_name;
-        if (!contactBusiness.address.street && cp.street_address) contactBusiness.address.street = cp.street_address;
-        if (!contactBusiness.address.city && cp.city) contactBusiness.address.city = cp.city;
-        if (!contactBusiness.address.state && cp.state) contactBusiness.address.state = cp.state;
-        if (!contactBusiness.address.zip && cp.zip_code) contactBusiness.address.zip = cp.zip_code;
-      }
-      // Merge: fill in any blanks from the contact page
-      if (!business.address.street && contactBusiness.address.street) business.address.street = contactBusiness.address.street;
-      if (!business.address.city   && contactBusiness.address.city)   business.address.city   = contactBusiness.address.city;
-      if (!business.address.state  && contactBusiness.address.state)  business.address.state  = contactBusiness.address.state;
-      if (!business.address.zip    && contactBusiness.address.zip)    business.address.zip    = contactBusiness.address.zip;
-      if (business.phones.length === 0 && contactBusiness.phones.length > 0) business.phones = contactBusiness.phones;
-      if (business.emails.length === 0 && contactBusiness.emails.length > 0) business.emails = contactBusiness.emails;
-      if (contactBusiness.socialSignals && contactBusiness.socialSignals.length > 0) {
-        const existingPlatforms = new Set(business.socialSignals.map(s => s.platform));
-        contactBusiness.socialSignals.forEach(s => {
-          if (!existingPlatforms.has(s.platform)) business.socialSignals.push(s);
-        });
-      }
-      console.log(`  [CONTACT PAGE] merged address/phone/social from contact subpage`);
-    }
-
-    business.strength = buildBusinessStrengthSignals(business);
-
-    console.log(`  -> ${websiteStatus} | ${business.businessName} | Phones:${business.phones.length} Emails:${business.emails.length} Social:${business.socialSignals?.length || 0} | ${business.country.name}`);
-    const bizResult = { domain, websiteStatus, reasons: contentAnalysis.reasons, business };
-    res.json(bizResult);
-  } catch (err) {
-    console.error(`  -> BIZ ERROR: ${err.message}\n${err.stack}`);
-    // Return a degraded 200 response instead of 500 so the frontend can display partial info
-    res.json({ domain, websiteStatus: 'ERROR', reasons: [err.message || 'Extraction failed'], business: { businessName: '', phones: [], emails: [], address: { street:'', city:'', state:'', zip:'' }, country: { code:'UNKNOWN', name:'Unknown', confidence:'none' }, metaDescription: null, businessType: null, socialSignals: [], strength: { score: 0, confidence: 'low', signals: { hasBusinessName:false, hasPhone:false, hasEmail:false, hasStreetAddress:false, hasLocality:false, hasSchemaName:false, hasMetaDescription:false, hasSocialPresence:false, socialCount:0 } } } });
-  }
-});
-
-// === DOMAIN AGE ENDPOINT ===
-app.get('/api/domain-age', async (req, res) => {
-  const domain = normalizeDomain(req.query.domain || '');
-  if (!domain) return res.status(400).json({ error: 'domain query parameter is required' });
-  try {
-    const result = await getDomainAge(domain);
     res.json({
       domain,
-      ageText: result.ageText || null,
-      createdDate: result.createdDate || null,
-      ageInDays: result.ageInDays || null,
-      registrar: result.registrar || null,
-      error: result.error || null,
+      timestamp: new Date().toISOString(),
+      overallStatus,
+      statusColor: statusColors[overallStatus] || 'gray',
+      isGenuinelyValid: overallStatus === 'ACTIVE',
+      dns: dnsResult,
+      ssl: sslResult,
+      http: {
+        statusCode: httpResult.statusCode,
+        statusText: httpResult.statusText,
+        isUp: httpResult.isUp,
+        finalUrl: httpResult.finalUrl,
+        responseTime: httpResult.responseTime,
+        headers: httpResult.headers,
+      },
+      content: buildContentPayload($, overallStatus, httpResult.finalUrl, domain),
+      domainAge,
     });
   } catch (e) {
-    res.json({ domain, ageText: null, createdDate: null, error: e.message });
+    res.status(500).json({ error: e.message, domain, overallStatus: 'ERROR' });
   }
 });
 
-app.get('/api/health', (req, res) => res.json({ status:'ok', uptime:process.uptime(), version:'3.7' }));
+// ── Business info extraction ──
+app.post('/api/extract-business', async (req, res) => {
+  const domain = normalizeDomain(req.body?.domain || '');
+  if (!domain) return res.status(400).json({ error: 'domain required' });
 
-// === DOMAIN AGE DEBUG ENDPOINT ===
-// Hit: GET /api/debug-domain-age?domain=ccplumbingservice.com
-// Shows every attempt, what worked, what failed, and why
-app.get('/api/debug-domain-age', async (req, res) => {
-  const domain = normalizeDomain(req.query.domain || 'ccplumbingservice.com');
-  console.log(`[DEBUG-AGE] ${domain}`);
-  const result = await getDomainAge(domain);
+  try {
+    const [dnsResult, httpResult] = await Promise.all([checkDns(domain), checkHttp(domain)]);
+    const $ = cheerio.load(httpResult.html || '');
 
-  const passed  = result.attempts.filter(a => a.status === 'ok');
-  const failed  = result.attempts.filter(a => a.status === 'fail');
-  const noData  = result.attempts.filter(a => a.status !== 'ok' && a.status !== 'fail');
+    let websiteStatus;
+    if (!dnsResult.hasARecord && !httpResult.isUp) websiteStatus = 'DEAD';
+    else if (!httpResult.isUp) websiteStatus = 'DOWN';
+    else websiteStatus = detectStatus($, {
+      statusCode: httpResult.statusCode,
+      isUp: httpResult.isUp,
+      finalUrl: httpResult.finalUrl,
+      originalDomain: domain,
+    });
 
-  res.json({
-    domain,
+    const content = buildContentPayload($, websiteStatus, httpResult.finalUrl, domain);
 
-    success: !!result.createdDate,
-    createdDate:  result.createdDate,
-    ageText:      result.ageText,
-    registrar:    result.registrar,
-    expiresDate:  result.expiresDate,
-    summary: {
-      totalAttempts: result.attempts.length,
-      passed:  passed.map(a => a.source),
-      failed:  failed.map(a => `${a.source} (${a.error})`),
-      noData:  noData.map(a => `${a.source} (${a.status}: ${a.sample||a.keys||''})`),
-    },
-    attempts: result.attempts,
-    error: result.error || null,
-    tip: result.createdDate
-      ? 'Domain age successfully retrieved ✅'
-      : 'All services failed. If errors are EAI_AGAIN or ECONNREFUSED, Render is blocking outbound DNS/HTTPS to these hosts. All 6 services in the chain are unlimited and require no API key.',
-  });
+    // Dead / unreachable / blocked: return minimal response
+    if (['DEAD', 'DOWN', 'SUSPENDED', 'BLOCKED'].includes(websiteStatus)) {
+      return res.json({
+        domain, websiteStatus, reasons: content.reasons,
+        business: {
+          businessName: null, phones: [], emails: [],
+          address: { street: '', city: '', state: '', zip: '' },
+          socialSignals: [], metaDescription: null, businessType: null, confidence: 0,
+        },
+      });
+    }
+
+    // Run Python extractor on main page
+    const pyMain = await runPython(httpResult.html, httpResult.finalUrl || `https://${domain}`, domain);
+
+    // If still missing contact info, try /contact page
+    const needsMore = !pyMain?.phones?.length || !pyMain?.address?.street;
+    let pyContact = null;
+    if (needsMore) {
+      const contactUrls = [`https://${domain}/contact`, `https://${domain}/contact-us`];
+      for (const cu of contactUrls) {
+        try {
+          const ch = await checkHttp(cu);
+          if (ch.isUp && ch.html) {
+            pyContact = await runPython(ch.html, ch.finalUrl, domain);
+            break;
+          }
+        } catch { /* skip */ }
+      }
+    }
+
+    // Merge contact page into main result
+    const biz = pyMain || {};
+    if (pyContact) {
+      if (!biz.phones?.length  && pyContact.phones?.length)  biz.phones  = pyContact.phones;
+      if (!biz.emails?.length  && pyContact.emails?.length)  biz.emails  = pyContact.emails;
+      if (!biz.address?.street && pyContact.address?.street) biz.address = pyContact.address;
+      // Merge social signals (no duplicates by platform)
+      const seen = new Set((biz.social_signals || []).map(s => s.platform));
+      for (const sig of pyContact.social_signals || []) {
+        if (!seen.has(sig.platform)) { biz.social_signals = biz.social_signals || []; biz.social_signals.push(sig); seen.add(sig.platform); }
+      }
+    }
+
+    res.json({
+      domain,
+      websiteStatus,
+      reasons: content.reasons,
+      business: {
+        businessName:   biz.business_name   || null,
+        phones:         biz.phones          || [],
+        emails:         biz.emails          || [],
+        address:        biz.address         || { street: '', city: '', state: '', zip: '' },
+        socialSignals:  biz.social_signals  || [],
+        metaDescription: biz.meta_description || null,
+        businessType:   biz.business_type   || null,
+        confidence:     biz.confidence_score || 0,
+        country:        biz.country         || { code: 'US', name: 'United States' },
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message, domain, websiteStatus: 'ERROR' });
+  }
 });
 
-app.listen(PORT, () => {
-  console.log(`\n=== Website Intelligence v3.0 ===`);
-  console.log(`Dashboard: http://localhost:${PORT}`);
-  console.log(`API:       http://localhost:${PORT}/api/analyze`);
-  console.log(`Business:  http://localhost:${PORT}/api/extract-business\n`);
-});
+app.listen(PORT, () => console.log(`Website Intelligence v4.0 on port ${PORT}`));
