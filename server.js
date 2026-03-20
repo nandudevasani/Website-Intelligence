@@ -661,6 +661,7 @@ function analyzeContent(html, domain, finalUrl) {
   analysis.reasons.push('Website has substantive content and appears to be a legitimate, active site');
   return analysis;
 }
+}
 
 // === ENDPOINTS ===
 
