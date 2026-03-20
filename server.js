@@ -772,6 +772,12 @@ app.post('/api/analyze', async (req, res) => {
   console.log(`\n[SCAN] ${domain}`);
 
   try {
+    // Fire domain-age (WHOIS) concurrently with DNS/SSL/HTTP — no sequential wait
+    const agePromise = Promise.race([
+      getDomainAge(domain),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('age-timeout')), 10000))
+    ]);
+
     const [dnsResults, sslResults, httpResults] = await Promise.all([analyzeDNS(domain), analyzeSSL(domain), analyzeHTTPStatus(domain)]);
     const { result: httpStatus, html } = httpResults;
     const contentAnalysis = analyzeContent(html, domain, httpStatus.finalUrl);
@@ -799,12 +805,10 @@ app.post('/api/analyze', async (req, res) => {
 
     const genuinelyValid = ['ACTIVE','POLITICAL_CAMPAIGN'].includes(overallStatus);
 
-    // Domain age lookup — race against a 10s timeout so it never blocks the response
+    // Await the already-running domain age promise (started concurrently above)
     let domainAge = null;
     try {
-      const agePromise = getDomainAge(domain);
-      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('age-timeout')), 10000));
-      const ageResult = await Promise.race([agePromise, timeoutPromise]);
+      const ageResult = await agePromise;
       if (ageResult && ageResult.createdDate) {
         domainAge = { ageText: ageResult.ageText, createdDate: ageResult.createdDate, ageInDays: ageResult.ageInDays, registrar: ageResult.registrar };
       }
