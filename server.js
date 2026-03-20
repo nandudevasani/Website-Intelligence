@@ -143,7 +143,7 @@ async function extractBusinessWithPython(html, pageUrl) {
       const timer = setTimeout(() => {
         py.kill('SIGKILL');
         settle({ ok: false, error: 'Python extractor timed out' });
-      }, 12000);
+      }, 8000);
 
       py.stdout.on('data', (d) => { out += d.toString(); });
       py.stderr.on('data', (d) => { err += d.toString(); });
@@ -233,7 +233,7 @@ function analyzeSSL(domain) {
   return new Promise((resolve) => {
     const r = { valid:false, issuer:null, subject:null, validFrom:null, validTo:null, daysRemaining:null, protocol:null, error:null };
     try {
-      const req = https.request({ hostname:domain, port:443, method:'HEAD', timeout:10000, rejectUnauthorized:false }, (res) => {
+      const req = https.request({ hostname:domain, port:443, method:'HEAD', timeout:5000, rejectUnauthorized:false }, (res) => {
         try {
           // Pass false to avoid fetching the full chain — still has circular issuerCertificate
           // so we ONLY read named primitive string fields, never spread or assign the object
@@ -288,7 +288,7 @@ async function analyzeHTTPStatus(domain, retries = 1) {
     try {
       if (attempt > 0) await new Promise(ok => setTimeout(ok, 1000 * attempt));
       const res = await axios.get(buildUrl(domain), {
-        timeout: 8000,
+        timeout: 5000,
         maxRedirects: 10,
         validateStatus: () => true,
         headers: hdrs,
@@ -307,7 +307,7 @@ async function analyzeHTTPStatus(domain, retries = 1) {
       // Final attempt: try HTTP fallback
       try {
         const fb = await axios.get(buildUrl(domain, 'http'), {
-          timeout: 10000,
+          timeout: 6000,
           maxRedirects: 10,
           validateStatus: () => true,
           headers: { 'User-Agent': hdrs['User-Agent'], 'Accept': hdrs['Accept'] },
@@ -2038,7 +2038,7 @@ async function fetchContactPage(domain, homepageHtml) {
       .filter(h => h && h.startsWith('/') && h.length > 1 && h.length < 60)
       .map(h => h.split('?')[0].split('#')[0]);
 
-    const toTry = [...new Set([...foundSlugs, ...contactSlugs])].slice(0, 12);
+    const toTry = [...new Set([...foundSlugs, ...contactSlugs])].slice(0, 6);
 
     const hdrs = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -2047,8 +2047,8 @@ async function fetchContactPage(domain, homepageHtml) {
 
     const trySlug = async (slug) => {
       const resp = await axios.get(`https://${domain}${slug}`, {
-        timeout: 6000,
-        maxRedirects: 5,
+        timeout: 4000,
+        maxRedirects: 3,
         validateStatus: s => s === 200,
         headers: hdrs,
         responseType: 'text',   // FIX: consistent with main fetch
@@ -2081,6 +2081,21 @@ app.post('/api/extract-business', async (req, res) => {
 
   const domain = normalizeDomain(rawDomain);
   console.log(`\n[BIZ] ${domain}`);
+
+  // FIX: Hard 25s route timeout — Render free tier kills at 30s with no response
+  // (empty TCP RST = "Server returned an empty response" on the client).
+  // If we haven't responded by 25s, send whatever partial data we have.
+  let routeSettled = false;
+  const routeTimer = setTimeout(() => {
+    if (routeSettled || res.headersSent) return;
+    routeSettled = true;
+    console.error(`  -> TIMEOUT: ${domain} — forced partial response at 25s`);
+    res.status(200).json({
+      domain, websiteStatus: 'TIMEOUT',
+      reasons: ['Request timed out after 25s — site may be very slow or blocking crawlers'],
+      business: { businessName:'', phones:[], emails:[], address:{street:'',city:'',state:'',zip:''}, country:{code:'UNKNOWN',name:'Unknown',confidence:'none'}, metaDescription:null, businessType:null, socialSignals:[], strength:{score:0,confidence:'low',signals:{hasBusinessName:false,hasPhone:false,hasEmail:false,hasStreetAddress:false,hasLocality:false,hasSchemaName:false,hasMetaDescription:false,hasSocialPresence:false,socialCount:0}} }
+    });
+  }, 25000);
 
   try {
     const [dnsResults, httpResults] = await Promise.all([analyzeDNS(domain), analyzeHTTPStatus(domain)]);
@@ -2188,14 +2203,22 @@ app.post('/api/extract-business', async (req, res) => {
         }
       };
     }
-    res.json(bizResult);
+    if (!routeSettled && !res.headersSent) {
+      routeSettled = true;
+      clearTimeout(routeTimer);
+      res.json(bizResult);
+    }
 
   } catch (err) {
     console.error(`  -> BIZ ERROR: ${err.message}\n${err.stack}`);
-    res.json({
-      domain, websiteStatus: 'ERROR', reasons: [err.message || 'Extraction failed'],
-      business: { businessName:'', phones:[], emails:[], address:{street:'',city:'',state:'',zip:''}, country:{code:'UNKNOWN',name:'Unknown',confidence:'none'}, metaDescription:null, businessType:null, socialSignals:[], strength:{score:0,confidence:'low',signals:{hasBusinessName:false,hasPhone:false,hasEmail:false,hasStreetAddress:false,hasLocality:false,hasSchemaName:false,hasMetaDescription:false,hasSocialPresence:false,socialCount:0}} }
-    });
+    if (!routeSettled && !res.headersSent) {
+      routeSettled = true;
+      clearTimeout(routeTimer);
+      res.json({
+        domain, websiteStatus: 'ERROR', reasons: [err.message || 'Extraction failed'],
+        business: { businessName:'', phones:[], emails:[], address:{street:'',city:'',state:'',zip:''}, country:{code:'UNKNOWN',name:'Unknown',confidence:'none'}, metaDescription:null, businessType:null, socialSignals:[], strength:{score:0,confidence:'low',signals:{hasBusinessName:false,hasPhone:false,hasEmail:false,hasStreetAddress:false,hasLocality:false,hasSchemaName:false,hasMetaDescription:false,hasSocialPresence:false,socialCount:0}} }
+      });
+    }
   }
 });
 
