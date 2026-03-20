@@ -110,7 +110,7 @@
     .bt tbody tr{transition:background .15s}.bt tbody tr:hover{background:var(--card-h)}
     .bd{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:.8rem}
     .bsb{display:inline-block;padding:3px 9px;border-radius:6px;font-size:.7rem;font-weight:700;letter-spacing:.04em;white-space:nowrap}
-    .bsb.ACTIVE{background:var(--grn-b);color:var(--grn)}.bsb.DEAD,.bsb.DOWN,.bsb.SUSPENDED{background:var(--red-b);color:var(--red)}.bsb.PARKED,.bsb.NO_CONTENT,.bsb.DEFAULT_PAGE,.bsb.SHELL_SITE{background:var(--org-b);color:var(--org)}.bsb.COMING_SOON,.bsb.ISSUES{background:var(--yel-b);color:var(--yel)}.bsb.CROSS_DOMAIN_REDIRECT{background:var(--red-b);color:var(--red)}.bsb.POLITICAL_CAMPAIGN{background:var(--blu-b);color:var(--blu)}.bsb.BLOCKED{background:var(--org-b);color:var(--org)}.bsb.ERROR{background:var(--red-b);color:var(--red)}
+    .bsb.ACTIVE{background:var(--grn-b);color:var(--grn)}.bsb.DEAD,.bsb.DOWN,.bsb.SUSPENDED{background:var(--red-b);color:var(--red)}.bsb.PARKED,.bsb.NO_CONTENT,.bsb.DEFAULT_PAGE,.bsb.SHELL_SITE{background:var(--org-b);color:var(--org)}.bsb.COMING_SOON,.bsb.ISSUES{background:var(--yel-b);color:var(--yel)}.bsb.CROSS_DOMAIN_REDIRECT{background:var(--red-b);color:var(--red)}.bsb.POLITICAL_CAMPAIGN{background:var(--blu-b);color:var(--blu)}.bsb.BLOCKED{background:var(--org-b);color:var(--org)}.bsb.ERROR{background:var(--red-b);color:var(--red)}.bsb.TIMEOUT{background:var(--org-b);color:var(--org)}
     .bv{font-weight:700;font-size:.82rem}.bv.yes{color:var(--grn)}.bv.no{color:var(--red)}
     .social-link{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;background:var(--bg2);border-radius:5px;font-size:.7rem;color:var(--acc);text-decoration:none;margin:2px;font-family:'JetBrains Mono',monospace;transition:background .2s}.social-link:hover{background:var(--card-h);color:var(--t1)}
     .social-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;background:var(--bg2);border:1px solid var(--bdr);text-decoration:none;margin:2px;transition:all .2s;flex-shrink:0}
@@ -244,16 +244,38 @@ function hideLoader(){document.getElementById('loader').classList.remove('show')
 function showErr(m){const e=document.getElementById('errbox');e.textContent=m;e.classList.add('show')}
 function showProgress(c,t,d){document.getElementById('pbar-wrap').style.display='block';document.getElementById('ptext').style.display='block';const p=t>0?Math.round(c/t*100):0;document.getElementById('pbar').style.width=p+'%';document.getElementById('ptext').textContent=c+'/'+t+' done'+(d?' — '+d:'');document.getElementById('loader-hl').textContent=c+'/'+t}
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
-const fmtS=s=>({ACTIVE:'Active',DEAD:'Dead',DOWN:'Down',PARKED:'Parked',COMING_SOON:'Coming Soon',NO_CONTENT:'No Content',DEFAULT_PAGE:'Default Page',SUSPENDED:'Suspended',SHELL_SITE:'Shell Site',CROSS_DOMAIN_REDIRECT:'Cross-Domain Redirect',POLITICAL_CAMPAIGN:'Political Campaign',BLOCKED:'Blocked',ISSUES:'Issues',ERROR:'Error',UNKNOWN:'Unknown'}[s]||s);
+const fmtS=s=>({ACTIVE:'Active',DEAD:'Dead',DOWN:'Down',PARKED:'Parked',COMING_SOON:'Coming Soon',NO_CONTENT:'No Content',DEFAULT_PAGE:'Default Page',SUSPENDED:'Suspended',SHELL_SITE:'Shell Site',CROSS_DOMAIN_REDIRECT:'Cross-Domain Redirect',POLITICAL_CAMPAIGN:'Political Campaign',BLOCKED:'Blocked',ISSUES:'Issues',ERROR:'Error',TIMEOUT:'Timeout',UNKNOWN:'Unknown'}[s]||s);
 const sEmoji=s=>({ACTIVE:'✓',DEAD:'✗',DOWN:'✗',PARKED:'⊘',COMING_SOON:'◔',NO_CONTENT:'○',DEFAULT_PAGE:'▤',SUSPENDED:'⊘',SHELL_SITE:'◇',CROSS_DOMAIN_REDIRECT:'↯',POLITICAL_CAMPAIGN:'★',BLOCKED:'⊘',ISSUES:'!'}[s]||'?');
 const fmtV=v=>({VALID:'Genuine Active Website',PARKED:'Parked / For Sale',COMING_SOON:'Coming Soon',NO_CONTENT:'No Meaningful Content',DEFAULT_PAGE:'Default Server Page',SUSPENDED:'Suspended',SHELL_SITE:'Template Shell',CROSS_DOMAIN_REDIRECT:'Cross-Domain Redirect',POLITICAL_CAMPAIGN:'Political Campaign',BLOCKED:'Blocked (WAF/Cloudflare)'}[v]||v);
 const vC=v=>({VALID:'green',PARKED:'orange',COMING_SOON:'yellow',NO_CONTENT:'orange',DEFAULT_PAGE:'orange',SUSPENDED:'red',SHELL_SITE:'orange',CROSS_DOMAIN_REDIRECT:'red',POLITICAL_CAMPAIGN:'blue',BLOCKED:'orange'}[v]||'orange');
 const vE=v=>({VALID:'✅',PARKED:'🅿️',COMING_SOON:'🚧',NO_CONTENT:'📭',DEFAULT_PAGE:'📄',SUSPENDED:'🚫',SHELL_SITE:'🏗️',CROSS_DOMAIN_REDIRECT:'⚠️',POLITICAL_CAMPAIGN:'🏛️',BLOCKED:'🛡️'}[v]||'❓');
 const sColor=s=>({ACTIVE:'green',DEAD:'red',DOWN:'red',PARKED:'orange',COMING_SOON:'yellow',NO_CONTENT:'orange',DEFAULT_PAGE:'orange',SUSPENDED:'red',SHELL_SITE:'orange',CROSS_DOMAIN_REDIRECT:'red',POLITICAL_CAMPAIGN:'blue',BLOCKED:'orange',ISSUES:'yellow',ERROR:'red'}[s]||'orange');
 
-// Warmup ping — wake Render free tier, but never block on failure
+// Warmup: poll /api/health until the server responds with 200 OK.
+// Render free tier cold-starts in 20-35s. A single 5s ping fires too early
+// and we hit domains while the server is still booting -> empty response.
+// We poll every 4s for up to 40s, showing live countdown to the user.
 async function warmup(){
-  try{await fetch(API+'/api/health',{signal:AbortSignal.timeout(5000)})}catch(e){}
+  const MAX=40000, INTERVAL=4000;
+  const t0=Date.now();
+  let attempt=0;
+  while(Date.now()-t0 < MAX){
+    attempt++;
+    try{
+      const r=await fetch(API+'/api/health',{signal:AbortSignal.timeout(INTERVAL-200)});
+      if(r.ok){
+        const elapsed=((Date.now()-t0)/1000).toFixed(1);
+        document.getElementById('loader-sub').textContent='Server ready ('+elapsed+'s)';
+        return true;
+      }
+    }catch(e){}
+    const remaining=Math.ceil((MAX-(Date.now()-t0))/1000);
+    document.getElementById('loader-sub').textContent='Waking server... ('+remaining+'s remaining)';
+    await new Promise(r=>setTimeout(r,300));
+  }
+  // Timed out — server might still be starting, proceed anyway
+  document.getElementById('loader-sub').textContent='Server may be slow — proceeding...';
+  return false;
 }
 
 // ─── FIX: fetchWithRetry ─────────────────────────────────────────────────────
@@ -278,9 +300,10 @@ async function fetchWithRetry(url,body,retries=1,signal=null){
       const text=await r.text();
 
       if(!text||!text.trim()){
-        // Server sent empty body — crash, OOM, or Render free tier restart
-        if(i<retries){await wait(2000);continue}
-        throw new Error('Server returned an empty response. It may be restarting — please try again in a few seconds.');
+        // Server sent empty body — still cold-starting or mid-restart.
+        // Wait progressively longer between retries to let it boot.
+        if(i<retries){await wait(3000+i*2000);continue}
+        throw new Error('Server cold-start timeout. Please click the button again — the server needs a moment to wake up.');
       }
 
       let data;
@@ -352,9 +375,9 @@ async function doBulk(){
   const ctrl=new AbortController();cancelCtrl.bulk=ctrl;
   const btn=document.getElementById('bulk-btn');btn.disabled=true;
   document.getElementById('bulk-cancel').style.display='block';
-  showLoader('Warming up...','Waking server before analysis...');
+  showLoader('Warming up...','Contacting server...');
 
-  await warmup();await wait(500);
+  await warmup();
 
   showProgress(0,doms.length,'');
   const results=[];let retryQueue=[];
@@ -363,7 +386,7 @@ async function doBulk(){
     if(ctrl.signal.aborted)break;
     showProgress(i,doms.length,doms[i]);
     try{
-      const d=await fetchWithRetry(API+'/api/analyze',{domain:doms[i]},1,ctrl.signal);
+      const d=await fetchWithRetry(API+'/api/analyze',{domain:doms[i]},2,ctrl.signal);
       results.push({domain:d.domain||doms[i],overallStatus:d.overallStatus||'ERROR',isGenuinelyValid:d.isGenuinelyValid||false,statusCode:d.http?.statusCode,confidence:d.content?.confidence,reasons:d.content?.reasons||[],flags:d.content?.flags||[],redirectInfo:d.content?.redirectInfo,title:d.content?.details?.title,wordCount:d.content?.details?.wordCount,uniqueWordCount:d.content?.details?.uniqueWordCount});
     }catch(e){
       if(e.name==='AbortError')break;
@@ -425,9 +448,9 @@ async function doBiz(){
   const ctrl=new AbortController();cancelCtrl.biz=ctrl;
   const btn=document.getElementById('biz-btn');btn.disabled=true;
   document.getElementById('biz-cancel').style.display='block';
-  showLoader('Warming up...','Waking server...');
+  showLoader('Warming up...','Contacting server...');
 
-  await warmup();await wait(500);
+  await warmup();
 
   showProgress(0,doms.length,'');
   const results=[];let retryQueue=[];
@@ -436,7 +459,7 @@ async function doBiz(){
     if(ctrl.signal.aborted)break;
     showProgress(i,doms.length,doms[i]);
     try{
-      const d=await fetchWithRetry(API+'/api/extract-business',{domain:doms[i]},1,ctrl.signal);
+      const d=await fetchWithRetry(API+'/api/extract-business',{domain:doms[i]},2,ctrl.signal);
       results.push({domain:d.domain||doms[i],websiteStatus:d.websiteStatus||'UNKNOWN',reasons:d.reasons||[],...(d.business||{}),error:d.error||null});
     }catch(e){
       if(e.name==='AbortError')break;
