@@ -225,24 +225,41 @@ async function analyzeDNS(domain) {
 }
 
 // === SSL ANALYSIS ===
+// FIX: getPeerCertificate() returns an object with circular refs (issuerCertificate
+// points back to itself). Spreading or JSON.stringify-ing it causes
+// "Converting circular structure to JSON" → res.json() throws → client gets empty
+// body → "Unexpected end of JSON input". Only extract named primitive fields.
 function analyzeSSL(domain) {
   return new Promise((resolve) => {
     const r = { valid:false, issuer:null, subject:null, validFrom:null, validTo:null, daysRemaining:null, protocol:null, error:null };
     try {
       const req = https.request({ hostname:domain, port:443, method:'HEAD', timeout:10000, rejectUnauthorized:false }, (res) => {
-        const c = res.socket.getPeerCertificate();
-        if (c && Object.keys(c).length > 0) {
-          r.valid = res.socket.authorized;
-          r.issuer = c.issuer ? (c.issuer.O || c.issuer.CN || 'Unknown') : 'Unknown';
-          r.subject = c.subject ? (c.subject.CN || 'Unknown') : 'Unknown';
-          r.validFrom = c.valid_from || null; r.validTo = c.valid_to || null;
-          if (c.valid_to) r.daysRemaining = Math.floor((new Date(c.valid_to) - new Date()) / 86400000);
-          r.protocol = res.socket.getProtocol ? res.socket.getProtocol() : null;
+        try {
+          // Pass false to avoid fetching the full chain — still has circular issuerCertificate
+          // so we ONLY read named primitive string fields, never spread or assign the object
+          const c = res.socket.getPeerCertificate(false);
+          if (c && typeof c === 'object' && (c.subject || c.issuer)) {
+            r.valid = res.socket.authorized === true;
+            // Extract only string primitives — never reference c.issuerCertificate
+            r.issuer  = typeof c.issuer?.O  === 'string' ? c.issuer.O
+                      : typeof c.issuer?.CN === 'string' ? c.issuer.CN : 'Unknown';
+            r.subject = typeof c.subject?.CN === 'string' ? c.subject.CN : 'Unknown';
+            r.validFrom = typeof c.valid_from === 'string' ? c.valid_from : null;
+            r.validTo   = typeof c.valid_to   === 'string' ? c.valid_to   : null;
+            if (r.validTo) {
+              const ms = new Date(r.validTo) - new Date();
+              r.daysRemaining = isNaN(ms) ? null : Math.floor(ms / 86400000);
+            }
+            r.protocol = typeof res.socket.getProtocol === 'function'
+              ? res.socket.getProtocol() : null;
+          }
+        } catch (certErr) {
+          r.error = 'Cert parse error: ' + certErr.message;
         }
         resolve(r);
       });
-      req.on('error', (e) => { r.error = e.message; resolve(r); });
-      req.on('timeout', () => { r.error = 'Timed out'; req.destroy(); resolve(r); });
+      req.on('error',   (e) => { r.error = e.message;  resolve(r); });
+      req.on('timeout', ()  => { r.error = 'Timed out'; req.destroy(); resolve(r); });
       req.end();
     } catch (e) { r.error = e.message; resolve(r); }
   });
@@ -2204,6 +2221,16 @@ app.get('/api/debug-domain-age', async (req, res) => {
   const failed  = result.attempts.filter(a => a.status === 'fail');
   const noData  = result.attempts.filter(a => a.status !== 'ok' && a.status !== 'fail');
   res.json({ domain, success:!!result.createdDate, createdDate:result.createdDate, ageText:result.ageText, registrar:result.registrar, expiresDate:result.expiresDate, summary:{ totalAttempts:result.attempts.length, passed:passed.map(a=>a.source), failed:failed.map(a=>`${a.source} (${a.error})`), noData:noData.map(a=>`${a.source} (${a.status}: ${a.sample||a.keys||''})`) }, attempts:result.attempts, error:result.error||null });
+});
+
+// FIX: Global express error handler — catches any unhandled throw from async route
+// handlers that escape the try/catch. Without this, Express sends a 200 with an
+// empty body, which makes r.json() throw "Unexpected end of JSON input" on the frontend.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error('[GLOBAL ERROR HANDLER]', err.message);
+  if (res.headersSent) return;
+  try { res.status(500).json({ error: 'Internal server error', message: err.message }); } catch {}
 });
 
 app.listen(PORT, () => {
