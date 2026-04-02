@@ -175,7 +175,8 @@ async function extractBusinessWithPython(html, pageUrl) {
 }
 
 // === CDN / PLATFORM DOMAIN WHITELIST ===
-const CDN_HOSTING_DOMAINS = [
+// Set for O(1) lookup instead of Array.some() O(n) scan on every URL
+const CDN_HOSTING_SET = new Set([
   'cdn-website.com','cloudfront.net','cloudflare.com','workers.dev','pages.dev',
   'netlify.app','vercel.app','herokuapp.com','azurewebsites.net','azureedge.net',
   'amazonaws.com','googleapis.com','firebaseapp.com','web.app','onrender.com',
@@ -184,22 +185,192 @@ const CDN_HOSTING_DOMAINS = [
   'godaddysites.com','wsimg.com','secureserver.net','edgekey.net','akamaihd.net',
   'akamaized.net','fastly.net','lirp.cdn-website.com','dudaone.com','b-cdn.net',
   'cdninstagram.com','fbcdn.net','twimg.com','gstatic.com'
-];
+]);
 
 function isCDNDomain(url) {
   const root = extractRootDomain(url);
   const hostname = url.replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
-  return CDN_HOSTING_DOMAINS.some(cdn => root === cdn || hostname.endsWith('.' + cdn) || hostname === cdn);
+  return CDN_HOSTING_SET.has(root) || CDN_HOSTING_SET.has(hostname) ||
+    [...CDN_HOSTING_SET].some(cdn => hostname.endsWith('.' + cdn));
 }
 
 const KNOWN_WEB_APP_PATTERNS = [
-  { match: /outlook\.live\.com|outlook\.office/i, redirectsTo: 'microsoft.com', name: 'Microsoft Outlook' },
-  { match: /login\.live\.com/i, redirectsTo: 'microsoft.com', name: 'Microsoft Login' },
-  { match: /login\.microsoftonline\.com/i, redirectsTo: 'microsoft.com', name: 'Microsoft Online' },
-  { match: /accounts\.google\.com/i, redirectsTo: 'google.com', name: 'Google Accounts' },
-  { match: /mail\.google\.com/i, redirectsTo: 'google.com', name: 'Gmail' },
-  { match: /login\.yahoo\.com/i, redirectsTo: 'yahoo.com', name: 'Yahoo Login' }
+  { match: /outlook[.]live[.]com|outlook[.]office/i, redirectsTo: 'microsoft.com', name: 'Microsoft Outlook' },
+  { match: /login[.]live[.]com/i,                   redirectsTo: 'microsoft.com', name: 'Microsoft Login' },
+  { match: /login[.]microsoftonline[.]com/i,         redirectsTo: 'microsoft.com', name: 'Microsoft Online' },
+  { match: /accounts[.]google[.]com/i,               redirectsTo: 'google.com',   name: 'Google Accounts' },
+  { match: /mail[.]google[.]com/i,                   redirectsTo: 'google.com',   name: 'Gmail' },
+  { match: /login[.]yahoo[.]com/i,                   redirectsTo: 'yahoo.com',    name: 'Yahoo Login' }
 ];
+
+// ── PRE-COMPILED MODULE-LEVEL PATTERN CONSTANTS ───────────────────────────────
+// All pattern arrays that were previously rebuilt on every request are hoisted
+// here so they are compiled exactly once at startup.
+
+// Redirect spam target patterns
+const SPAM_REDIRECT_PATTERNS = [
+  /[/]articles[/]?$/i, /[/]blog[/]?$/i, /[/]news[/]?$/i,
+  /dot-[a-z]+[.]org/i, /searchhounds/i, /dot-guide/i, /dot-mom/i, /dot-consulting/i
+];
+
+// Cloudflare challenge signals
+const CF_CHALLENGE_PATTERNS = [
+  /just a moment/i, /checking your browser/i, /verify you are human/i,
+  /enable javascript and cookies/i, /cf-browser-verification/i, /challenge-platform/i,
+  /__cf_bm/i, /managed by cloudflare/i, /ray id:/i, /cloudflare to restrict access/i,
+  /attention required/i
+];
+
+// JS redirect patterns (applied to raw HTML since cheerio strips scripts)
+const JS_REDIRECT_PATTERNS = [
+  /window[.]location\s*(?:[.]href)?\s*=\s*["']([^"']+)["']/i,
+  /window[.]location[.]replace\s*[(]\s*["']([^"']+)["']\s*[)]/i,
+  /window[.]location[.]assign\s*[(]\s*["']([^"']+)["']\s*[)]/i,
+  /document[.]location\s*(?:[.]href)?\s*=\s*["']([^"']+)["']/i,
+  /location[.]href\s*=\s*["']([^"']+)["']/i,
+  /location[.]replace\s*[(]\s*["']([^"']+)["']\s*[)]/i,
+  /top[.]location\s*(?:[.]href)?\s*=\s*["']([^"']+)["']/i,
+  /self[.]location\s*(?:[.]href)?\s*=\s*["']([^"']+)["']/i,
+  /setTimeout\s*[(]\s*(?:function\s*[(][)]\s*[{])?\s*(?:window[.])?location\s*(?:[.]href)?\s*=\s*["']([^"']+)["']/i
+];
+
+// Builder/hosting indicators (used in shell-site detection)
+const BUILDER_INDICATORS = [
+  /wsimg[.]com/i, /godaddy/i, /websites[.]godaddy[.]com/i, /secureserver[.]net/i,
+  /cdn-website[.]com/i, /wix[.]com/i, /squarespace[.]com/i, /weebly[.]com/i
+];
+
+// Parked domain — title signals (checked against page title only)
+const PARKED_TITLE_SIGNALS = [
+  /buy\s+this\s+domain/i, /domain\s+for\s+sale/i, /domain\s+is\s+(parked|available)/i,
+  /get\s+this\s+domain/i, /purchase\s+this\s+domain/i, /make\s+an\s+offer/i,
+  /parked\s+(by|at|with)/i, /sedoparking/i, /afternic/i, /hugedomains/i
+];
+
+// Parked domain — body content signals
+const PARKED_BODY_PATTERNS = [
+  /this domain is (for sale|parked|available)/i, /buy this domain/i,
+  /domain (is )?parked/i, /parked (by|at|with|domain)/i,
+  /this (webpage|page|site|website) is parked/i, /domain (name )?for sale/i,
+  /purchase this domain/i, /make (an )?offer (on|for) this domain/i,
+  /hugedomains|sedo[.]com|dan[.]com|afternic|godaddy\s*auctions/i,
+  /sedoparking/i, /parkingcrew/i, /domainmarket[.]com/i,
+  /this\s+domain\s+is\s+for\s+sale/i,
+  /(?:buy|purchase|acquire|own)\s+(?:this\s+)?(?:premium\s+)?domain/i,
+  /^get this domain[\s!.]|[^a-z]get this domain[\s!.]/i,
+  /sponsored\s+listings/i, /related\s+searches/i
+];
+
+// Coming soon — title signals
+const CS_TITLE_SIGNALS = [
+  /coming\s+soon/i, /launching\s+soon/i, /under\s+construction/i,
+  /opening\s+soon/i, /almost\s+ready/i, /work\s+in\s+progress/i
+];
+
+// Coming soon — body content patterns
+const CS_BODY_PATTERNS = [
+  /coming\s+soon/i, /launching\s+soon/i, /under\s+construction/i,
+  /we['\u2019]?re\s+(building|launching|coming)/i,
+  /site\s+(is\s+)?(under\s+construction|being\s+built|coming\s+soon)/i,
+  /stay\s+tuned/i,
+  /something\s+(big|great|new|exciting|amazing)\s+is\s+(coming|on\s+the\s+way|brewing)/i,
+  /we['\u2019]?ll\s+be\s+(back|live|launching|ready)\s+soon/i,
+  /watch\s+this\s+space/i, /new\s+website\s+(is\s+)?(coming|under)/i,
+  /opening\s+soon/i, /check\s+back\s+(soon|later)/i,
+  /almost\s+(here|ready|there|done)/i, /notify\s+me\s+when/i, /get\s+notified/i,
+  /work\s+in\s+progress/i, /pardon\s+our\s+(dust|mess)/i,
+  /exciting\s+things\s+(are\s+)?coming/i
+];
+
+// Default server page patterns
+const DEFAULT_PAGE_PATTERNS = [
+  /default\s+(web\s+)?page/i, /this\s+is\s+(the|a)\s+default/i,
+  /web\s+server\s+(is\s+)?working/i, /apache.*default\s+page/i,
+  /welcome\s+to\s+nginx/i, /iis\s+windows\s+server/i,
+  /test\s+page.*apache/i, /congratulations.*successfully\s+installed/i,
+  /placeholder\s+page/i, /website\s+is\s+(almost|not\s+yet)\s+ready/i
+];
+
+// Suspended account patterns
+const SUSPENDED_PATTERNS = [
+  /account\s+(has\s+been\s+)?suspended/i,
+  /this\s+(site|account|website)\s+(has\s+been|is)\s+suspended/i,
+  /website\s+suspended/i, /hosting\s+account\s+suspended/i,
+  /bandwidth\s+(limit\s+)?exceeded/i, /account\s+deactivated/i,
+  /access\s+to\s+this\s+site\s+has\s+been\s+disabled/i
+];
+
+// Political campaign — strong signals
+const STRONG_POLITICAL_PATTERNS = [
+  /paid\s+for\s+by/i, /authorized\s+by\s+[\w\s]+committee/i,
+  /donate\s+to\s+(our|the|my)\s+campaign/i,
+  /find\s+a\s+(voting|polling)\s+location/i,
+  /registered\s+to\s+vote/i, /political\s+committee/i,
+  /political\s+action\s+committee/i,
+  /vote\s+(for|on)\s+(may|november|tuesday|monday|march|april|june|july|august|september|october|december|\d)/i
+];
+
+// Political campaign — medium signals
+const MEDIUM_POLITICAL_PATTERNS = [
+  /running\s+for\s+(office|mayor|governor|council|commissioner|congress|senate|board|judge|sheriff|attorney)/i,
+  /county\s+commissioner/i,
+  /campaign\s+(team|headquarters|office|donation|contribution)/i,
+  /join\s+(my|our|the)\s+campaign/i, /your\s+vote\s+(matters|counts)/i,
+  /on\s+the\s+ballot/i, /election\s+day/i, /primary\s+election/i,
+  /general\s+election/i
+];
+
+const POLITICAL_DOMAIN_PATTERNS = [ /^vote\d*[a-z]/i, /^elect[a-z]/i ];
+
+// Phone extraction patterns
+const PHONE_PATTERNS = [
+  /[(]?\d{3}[)]?[\s.-]\d{3}[\s.-]\d{4}/g,
+  /[+]1[\s.-]?[(]?\d{3}[)]?[\s.-]?\d{3}[\s.-]?\d{4}/g,
+  /[+]\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}/g
+];
+
+// Street suffixes as a Set — used in 3 places, now defined once
+const STREET_SUFFIX_SET = new Set([
+  'street','st','road','rd','avenue','ave','boulevard','blvd',
+  'lane','ln','drive','dr','court','ct','way','place','pl',
+  'circle','cir','trail','trl','parkway','pkwy','highway','hwy',
+  'terrace','ter','pike'
+]);
+// Regex form of street suffixes (used for matching in raw text)
+const STREET_SUFFIX_RE = /[.]?(street|st|avenue|ave|boulevard|blvd|drive|dr|road|rd|lane|ln|way|court|ct|place|pl|circle|cir|trail|trl|parkway|pkwy|highway|hwy|terrace|ter|pike)/i;
+
+// "Not a city" — words that should never be treated as a city name
+const NOT_A_CITY_RE = /LLC|Inc|Corp|Repair|Service|Plumbing|Mechanical|Management|Company|Group|Associates|Home|Commercial|Residential|the|and|for|your|this|terms|privacy|rights|contact|email|phone|subscribe|newsletter|sign\s*up/i;
+
+// US state full names → Set for O(1) lookup (replaces 500-byte alternation regex)
+const US_STATE_NAMES_SET = new Set([
+  'alabama','alaska','arizona','arkansas','california','colorado','connecticut',
+  'delaware','florida','georgia','hawaii','idaho','illinois','indiana','iowa',
+  'kansas','kentucky','louisiana','maine','maryland','massachusetts','michigan',
+  'minnesota','mississippi','missouri','montana','nebraska','nevada',
+  'new hampshire','new jersey','new mexico','new york','north carolina',
+  'north dakota','ohio','oklahoma','oregon','pennsylvania','rhode island',
+  'south carolina','south dakota','tennessee','texas','utah','vermont',
+  'virginia','washington','west virginia','wisconsin','wyoming'
+]);
+
+// Address-labeled patterns (for extractStructuredAddress)
+const LABELED_ADDR_PATTERNS = [
+  /(?:Address|Located\s+at|Our\s+(?:office|location)|Mailing\s+Address|Office\s+Address|Physical\s+Address|Street\s+Address|Headquarters|HQ|Corporate\s+Office|Visit\s+Us(?:\s+at)?)[:\s]+(\d{1,6}\s+[A-Za-z][A-Za-z0-9\s.#'&/,-]{2,85}?\s+(?:Street|St[.]?|Avenue|Ave[.]?|Boulevard|Blvd[.]?|Drive|Dr[.]?|Road|Rd[.]?|Lane|Ln[.]?|Way|Court|Ct[.]?|Place|Pl[.]?|Circle|Cir[.]?|Trail|Trl[.]?|Parkway|Pkwy[.]?|Highway|Hwy[.]?|Terrace|Ter[.]?|Pike)[.]?(?:[,\s]+[A-Za-z][A-Za-z\s.'-]{1,40}[,\s]+[A-Z]{2}\s*\d{5}(?:-\d{4})?)?)/i,
+  /(?:Address|Located\s+at|Our\s+(?:office|location)|Mailing\s+Address|Office\s+Address|Physical\s+Address)[:\s]+([A-Za-z0-9][A-Za-z0-9\s.#'&/,-]{4,120}?[A-Z]{2}\s*\d{5}(?:-\d{4})?)/i
+];
+
+// PO Box patterns
+const PO_BOX_PATTERNS = [
+  /((?:P[.]?\s*O[.]?|Post\s+Office)\s*Box\s*#?\s*[A-Z0-9-]{1,20}\s*,?\s*[A-Za-z][A-Za-z\s.'-]{1,40}\s*,?\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?)/gi,
+  /((?:P[.]?\s*O[.]?|Post\s+Office)\s*Box\s*#?\s*[A-Z0-9-]{1,20})/gi
+];
+
+// nameRegex keyword list — compiled once (was 809-byte inline in extractBusinessInfo)
+const NAME_KEYWORD_RE = /([A-Z][A-Za-z0-9&'.]{0,40}(?:[ \t]+[A-Za-z0-9&'.]+){0,6}[ \t]+(?:LLC|Inc[.]?|Corp[.]?|Corporation|Company|Services?|Solutions?|Repair|Removal|Junk\s+Removal|Plumbing|Mechanical|Management|Systems|Associates|Group|Partners|Enterprises?|Construction|Restoration|Properties|Realty|Holdings|Builders?|Hauling|Disposal|Electric(?:al)?|Roofing|Heating|Cooling|Landscaping|Painting|Contracting|Agency|Consulting|Studio|Design|Media|Logistics|Moving|Storage|Cleaning|Flooring|Paving|Fencing|Welding|Towing|Auto|Dental|Legal|Financial|Insurance|Advisors?|Interiors?|Exteriors?|Renovations?|Inspections?|Demolition|Excavat(?:ing|ion)|University|College|Institute|Academy|School|Seminary|Polytechnic|Center|Centre|Foundation|Hospital|Clinic|Church|Ministry|Ministries|Museum|Library|Laboratory|Labs?)(?:[ \t]+LLC|[.]?)?)/g;
+
+// Nav-link service-word guard for nameRegex (compiled once)
+const SERVICE_START_RE = /^(Foundation|Bowed|Failing|Basement|Exterior|Interior|Historical|Industrial|Commercial|Sidewalk|Walkway|Driveway|Blockwork|Brick|Stucco|Drainage|Waterproof|Stamped|Regular|Concrete|Asphalt|Masonry\s+Restoration|Stone\s+Masonry)/i;
 
 // === DNS ANALYSIS ===
 // FIX 4: Reduced DNS per-record timeout from 8000ms → 4000ms.
@@ -344,7 +515,7 @@ function analyzeContent(html, domain, finalUrl) {
       analysis.reasons.push('Website redirects to a different domain: ' + finalUrl);
       analysis.flags.push('CROSS_DOMAIN_REDIRECT');
       analysis.redirectInfo = { source:domain, target:finalUrl, targetDomain:finalRoot, method:'HTTP 3xx' };
-      const spamPatterns = [/\/articles\/?$/i, /\/blog\/?$/i, /\/news\/?$/i, /dot-[a-z]+\.org/i, /searchhounds/i, /dot-guide/i, /dot-mom/i, /dot-consulting/i];
+      const spamPatterns = SPAM_REDIRECT_PATTERNS;
       if (spamPatterns.some(p => p.test(finalUrl))) {
         analysis.confidence = 97; analysis.flags.push('SUSPICIOUS_REDIRECT_TARGET');
         analysis.reasons.push('Redirect target matches known SEO spam / link farm patterns');
@@ -411,12 +582,7 @@ function analyzeContent(html, domain, finalUrl) {
   analysis.details.links.external = externalLinks;
 
   // ── CLOUDFLARE CHALLENGE ──────────────────────────────────────
-  const cfChallengeSignals = [
-    /just a moment/i,/checking your browser/i,/verify you are human/i,
-    /enable javascript and cookies/i,/cf-browser-verification/i,/challenge-platform/i,
-    /__cf_bm/i,/managed by cloudflare/i,/ray id:/i,/cloudflare to restrict access/i,/attention required/i,
-  ];
-  const cfHits = cfChallengeSignals.filter(p => p.test(html)).length;
+  const cfHits = CF_CHALLENGE_PATTERNS.filter(p => p.test(html)).length;
   if (cfHits >= 2 && analysis.details.wordCount < 200) {
     analysis.verdict = 'BLOCKED'; analysis.confidence = 90;
     analysis.reasons.push('Website returned a Cloudflare bot-challenge page instead of real content');
@@ -426,19 +592,8 @@ function analyzeContent(html, domain, finalUrl) {
 
   // ── JS / META REDIRECT ────────────────────────────────────────
   let jsRedirectTarget = null;
-  const jsRedirectPatterns = [
-    /window\.location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i,
-    /window\.location\.replace\s*\(\s*["']([^"']+)["']\s*\)/i,
-    /window\.location\.assign\s*\(\s*["']([^"']+)["']\s*\)/i,
-    /document\.location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i,
-    /location\.href\s*=\s*["']([^"']+)["']/i,
-    /location\.replace\s*\(\s*["']([^"']+)["']\s*\)/i,
-    /top\.location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i,
-    /self\.location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i,
-    /setTimeout\s*\(\s*(?:function\s*\(\)\s*\{)?\s*(?:window\.)?location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i
-  ];
   // JS redirects must be read from raw HTML (cheerio strips <script> contents)
-  for (const p of jsRedirectPatterns) {
+  for (const p of JS_REDIRECT_PATTERNS) {
     const m = html.match(p);
     if (m && m[1] && (m[1].startsWith('http') || m[1].startsWith('//'))) { jsRedirectTarget = m[1]; break; }
   }
@@ -454,8 +609,7 @@ function analyzeContent(html, domain, finalUrl) {
       analysis.reasons.push('Website redirects to an unrelated domain: ' + jsRedirectTarget);
       analysis.flags.push('CROSS_DOMAIN_REDIRECT');
       analysis.redirectInfo = { source:domain, target:jsRedirectTarget, targetDomain:targetRoot, method: metaRefreshMatch ? 'Meta Refresh' : 'JavaScript' };
-      const spamPatterns = [/\/articles\/?$/i, /\/blog\/?$/i, /\/news\/?$/i, /dot-[a-z]+\.org/i, /searchhounds/i];
-      if (spamPatterns.some(p => p.test(jsRedirectTarget))) {
+      if (SPAM_REDIRECT_PATTERNS.some(p => p.test(jsRedirectTarget))) {
         analysis.confidence = 97; analysis.flags.push('SUSPICIOUS_REDIRECT_TARGET');
         analysis.reasons.push('Redirect target matches known SEO spam / link farm patterns');
       }
@@ -464,18 +618,17 @@ function analyzeContent(html, domain, finalUrl) {
   }
 
   const shellSignals = {
-    dropUsLine: /drop us a line/i.test(html),
-    emailList: /sign up for our email list/i.test(html),
-    recaptcha: /this site is protected by recaptcha/i.test(html),
-    cookieBanner: /this website uses cookies[\s\S]{0,300}accept/i.test(html),
-    poweredBy: /powered by/i.test(html),
-    contactUs: /contact\s+us\s*---/i.test(html),
-    googlePolicies: /google\s+privacy\s+policy[\s\S]{0,50}terms\s+of\s+service/i.test(html),
-    allRightsReserved: /all\s+rights\s+reserved/i.test(html)
+    dropUsLine:       /drop us a line/i.test(html),
+    emailList:        /sign up for our email list/i.test(html),
+    recaptcha:        /this site is protected by recaptcha/i.test(html),
+    cookieBanner:     /this website uses cookies[\s\S]{0,300}accept/i.test(html),
+    poweredBy:        /powered by/i.test(html),
+    contactUs:        /contact\s+us\s*---/i.test(html),
+    googlePolicies:   /google\s+privacy\s+policy[\s\S]{0,50}terms\s+of\s+service/i.test(html),
+    allRightsReserved:/all\s+rights\s+reserved/i.test(html)
   };
   const shellSignalCount = Object.values(shellSignals).filter(Boolean).length;
-  const builderIndicators = [/wsimg\.com/i, /godaddy/i, /websites\.godaddy\.com/i, /secureserver\.net/i, /cdn-website\.com/i, /wix\.com/i, /squarespace\.com/i, /weebly\.com/i];
-  const hasBuilderIndicator = builderIndicators.some(p => p.test(html));
+  const hasBuilderIndicator = BUILDER_INDICATORS.some(p => p.test(html));
 
   const titleText = (analysis.details.title || '').toLowerCase().trim();
   let titleRepeatCount = 0;
@@ -537,28 +690,10 @@ function analyzeContent(html, domain, finalUrl) {
   }
 
   // ── PARKED DETECTION — title + body combined ─────────────────
-  // Title analysis catches parked pages that only put "Buy This Domain"
-  // in the <title> tag with minimal/no body text (common on Sedo/GoDaddy).
-  // Body flag scan catches the rest.
   const titleLower = (analysis.details.title || '').toLowerCase();
-  const parkedTitleSignals = [
-    /buy\s+this\s+domain/i, /domain\s+for\s+sale/i, /domain\s+is\s+(parked|available)/i,
-    /get\s+this\s+domain/i, /purchase\s+this\s+domain/i, /make\s+an\s+offer/i,
-    /parked\s+(by|at|with)/i, /sedoparking/i, /afternic/i, /hugedomains/i
-  ];
-  const parkedBodyPatterns = [
-    /this domain is (for sale|parked|available)/i, /buy this domain/i, /domain (is )?parked/i,
-    /parked (by|at|with|domain)/i, /this (webpage|page|site|website) is parked/i,
-    /domain (name )?for sale/i, /purchase this domain/i, /make (an )?offer (on|for) this domain/i,
-    /hugedomains|sedo\.com|dan\.com|afternic|godaddy\s*auctions/i, /sedoparking/i, /parkingcrew/i,
-    /domainmarket\.com/i, /this\s+domain\s+is\s+for\s+sale/i,
-    /(?:buy|purchase|acquire|own)\s+(?:this\s+)?(?:premium\s+)?domain/i,
-    /^get this domain[\s!.]|[^a-z]get this domain[\s!.]/i,
-    /sponsored\s+listings/i, /related\s+searches/i,
-  ];
-  const titleParkedHit = parkedTitleSignals.some(p => p.test(titleLower));
-  let parkedScore = titleParkedHit ? 40 : 0;  // title match alone is sufficient evidence
-  parkedBodyPatterns.forEach(p => { if (p.test(bodyText)) parkedScore += 20; });
+  const titleParkedHit = PARKED_TITLE_SIGNALS.some(p => p.test(titleLower));
+  let parkedScore = titleParkedHit ? 40 : 0;
+  PARKED_BODY_PATTERNS.forEach(p => { if (p.test(bodyText)) parkedScore += 20; });
   if (parkedScore >= 40) {
     analysis.verdict = 'PARKED'; analysis.confidence = Math.min(parkedScore, 95);
     analysis.reasons.push('Domain appears to be parked or for sale');
@@ -567,24 +702,9 @@ function analyzeContent(html, domain, finalUrl) {
   }
 
   // ── COMING SOON DETECTION — title + body combined ─────────────
-  // Title-only signals (e.g. <title>Coming Soon</title> with no body) are
-  // now caught immediately without requiring body text hits.
-  const comingSoonTitleSignals = [
-    /coming\s+soon/i, /launching\s+soon/i, /under\s+construction/i,
-    /opening\s+soon/i, /almost\s+ready/i, /work\s+in\s+progress/i
-  ];
-  const comingSoonBodyPatterns = [
-    /coming\s+soon/i, /launching\s+soon/i, /under\s+construction/i,
-    /we['\u2019]?re\s+(building|launching|coming)/i, /site\s+(is\s+)?(under\s+construction|being\s+built|coming\s+soon)/i,
-    /stay\s+tuned/i, /something\s+(big|great|new|exciting|amazing)\s+is\s+(coming|on\s+the\s+way|brewing)/i,
-    /we['\u2019]?ll\s+be\s+(back|live|launching|ready)\s+soon/i, /watch\s+this\s+space/i,
-    /new\s+website\s+(is\s+)?(coming|under)/i, /opening\s+soon/i, /check\s+back\s+(soon|later)/i,
-    /almost\s+(here|ready|there|done)/i, /notify\s+me\s+when/i, /get\s+notified/i,
-    /work\s+in\s+progress/i, /pardon\s+our\s+(dust|mess)/i, /exciting\s+things\s+(are\s+)?coming/i
-  ];
-  const titleCSHit = comingSoonTitleSignals.some(p => p.test(titleLower));
-  let csScore = titleCSHit ? 30 : 0;  // title hit gives a head-start
-  comingSoonBodyPatterns.forEach(p => { if (p.test(bodyText)) csScore += 15; });
+  const titleCSHit = CS_TITLE_SIGNALS.some(p => p.test(titleLower));
+  let csScore = titleCSHit ? 30 : 0;
+  CS_BODY_PATTERNS.forEach(p => { if (p.test(bodyText)) csScore += 15; });
   if (csScore > 0 && analysis.details.wordCount < 100) csScore += 20;
   if (csScore > 0 && /countdown|timer|days.*hours.*min/i.test(bodyText)) csScore += 15;
   if (csScore > 15) {
@@ -594,26 +714,19 @@ function analyzeContent(html, domain, finalUrl) {
     return analysis;
   }
 
-  const defaultPagePatterns = [
-    /default\s+(web\s+)?page/i,/this\s+is\s+(the|a)\s+default/i,/web\s+server\s+(is\s+)?working/i,
-    /apache.*default\s+page/i,/welcome\s+to\s+nginx/i,/iis\s+windows\s+server/i,
-    /test\s+page.*apache/i,/congratulations.*successfully\s+installed/i,/placeholder\s+page/i,
-    /website\s+is\s+(almost|not\s+yet)\s+ready/i
-  ];
   const hasItWorks = /it\s+works/i.test(html) && analysis.details.wordCount < 50;
-  if ((defaultPagePatterns.some(p => p.test(html)) && analysis.details.wordCount < 100) || hasItWorks) {
+  if ((DEFAULT_PAGE_PATTERNS.some(p => p.test(html)) && analysis.details.wordCount < 100) || hasItWorks) {
     analysis.verdict = 'DEFAULT_PAGE'; analysis.confidence = 85;
-    analysis.reasons.push('Website shows a default server/hosting page'); analysis.flags.push('DEFAULT_PAGE'); return analysis;
+    analysis.reasons.push('Website shows a default server/hosting page');
+    analysis.flags.push('DEFAULT_PAGE');
+    return analysis;
   }
 
-  const suspendedPatterns = [
-    /account\s+(has\s+been\s+)?suspended/i,/this\s+(site|account|website)\s+(has\s+been|is)\s+suspended/i,
-    /website\s+suspended/i,/hosting\s+account\s+suspended/i,/bandwidth\s+(limit\s+)?exceeded/i,
-    /account\s+deactivated/i,/access\s+to\s+this\s+site\s+has\s+been\s+disabled/i
-  ];
-  if (suspendedPatterns.some(p => p.test(html))) {
+  if (SUSPENDED_PATTERNS.some(p => p.test(html))) {
     analysis.verdict = 'SUSPENDED'; analysis.confidence = 90;
-    analysis.reasons.push('Website account appears to be suspended'); analysis.flags.push('SUSPENDED'); return analysis;
+    analysis.reasons.push('Website account appears to be suspended');
+    analysis.flags.push('SUSPENDED');
+    return analysis;
   }
 
   const isSPA = (
@@ -644,22 +757,9 @@ function analyzeContent(html, domain, finalUrl) {
     analysis.reasons.push('Page has very few unique words — likely placeholder content'); analysis.flags.push('REPETITIVE_CONTENT'); return analysis;
   }
 
-  const strongPoliticalPatterns = [
-    /paid\s+for\s+by/i,/authorized\s+by\s+[\w\s]+committee/i,
-    /donate\s+to\s+(our|the|my)\s+campaign/i,/find\s+a\s+(voting|polling)\s+location/i,
-    /registered\s+to\s+vote/i,/political\s+committee/i,/political\s+action\s+committee/i,
-    /vote\s+(for|on)\s+(may|november|tuesday|monday|march|april|june|july|august|september|october|december|\d)/i
-  ];
-  const mediumPoliticalPatterns = [
-    /running\s+for\s+(office|mayor|governor|council|commissioner|congress|senate|board|judge|sheriff|attorney)/i,
-    /county\s+commissioner/i,/campaign\s+(team|headquarters|office|donation|contribution)/i,
-    /join\s+(my|our|the)\s+campaign/i,/your\s+vote\s+(matters|counts)/i,
-    /on\s+the\s+ballot/i,/election\s+day/i,/primary\s+election/i,/general\s+election/i
-  ];
-  const politicalDomainPatterns = [/^vote\d*[a-z]/i, /^elect[a-z]/i];
-  let strongHits = strongPoliticalPatterns.filter(p => p.test(html)).length;
-  let mediumHits = mediumPoliticalPatterns.filter(p => p.test(html)).length;
-  let domainHits = politicalDomainPatterns.filter(p => p.test(domain)).length;
+  const strongHits = STRONG_POLITICAL_PATTERNS.filter(p => p.test(html)).length;
+  const mediumHits = MEDIUM_POLITICAL_PATTERNS.filter(p => p.test(html)).length;
+  const domainHits = POLITICAL_DOMAIN_PATTERNS.filter(p => p.test(domain)).length;
   const isPolitical = (strongHits >= 1 && (mediumHits >= 1 || domainHits >= 1)) || (mediumHits >= 2 && domainHits >= 1) || (strongHits >= 2);
   if (isPolitical) {
     analysis.verdict = 'POLITICAL_CAMPAIGN';
@@ -1008,12 +1108,8 @@ function extractContactInfo(html, bodyText) {
     }
   });
 
-  const phonePatterns = [
-    /\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}/g,
-    /\+1[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/g,
-    /\+\d{1,3}[\s.\-]?\d{2,4}[\s.\-]?\d{3,4}[\s.\-]?\d{3,4}/g
-  ];
-  phonePatterns.forEach(p => {
+  PHONE_PATTERNS.forEach(p => {
+    const pat = new RegExp(p.source, p.flags); // reset lastIndex for global patterns
     const matches = bodyText.match(p) || [];
     matches.forEach(phone => {
       const digits = phone.replace(/\D/g, '');
@@ -1585,7 +1681,7 @@ function parseUSAddress(rawAddress) {
   }
 
   result.city = cleanToken(result.city).replace(/\s+[A-Za-z]{2}\s*\d{5}.*$/i, '').replace(/\s+[A-Za-z]{2}\s*$/i, '').trim();
-  const streetSuffixes = new Set(['street','st','road','rd','avenue','ave','boulevard','blvd','lane','ln','drive','dr','court','ct','way','place','pl','circle','cir','trail','trl','parkway','pkwy','highway','hwy','terrace','ter','pike']);
+  const streetSuffixes = STREET_SUFFIX_SET;
   let cityWords = result.city.split(/\s+/);
   while (cityWords.length > 0 && streetSuffixes.has(cityWords[0].toLowerCase().replace(/\.$/,''))) cityWords.shift();
   result.city = cityWords.join(' ');
@@ -1623,8 +1719,9 @@ function detectCountry(html, domain, schemaAddress, phones) {
     return { code: 'US', name: 'United States', confidence: 'high' };
   }
 
-  const usFullState = /\b(Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New\s+Hampshire|New\s+Jersey|New\s+Mexico|New\s+York|North\s+Carolina|North\s+Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode\s+Island|South\s+Carolina|South\s+Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West\s+Virginia|Wisconsin|Wyoming)\b/i.test(bodyText);
-  if (usFullState && /\.(com|net|org|us|info|biz)$/i.test(domain)) return { code: 'US', name: 'United States', confidence: 'medium' };
+  const usFullState = [...bodyText.toLowerCase().matchAll(/\b([a-z]+(?: [a-z]+)?)\b/g)]
+    .some(m => US_STATE_NAMES_SET.has(m[1]));
+  if (usFullState && /[.](com|net|org|us|info|biz)$/i.test(domain)) return { code: 'US', name: 'United States', confidence: 'medium' };
 
   const allPhoneText = (phones || []).join(' ') + ' ' + bodyText;
   const US_TOLL_FREE = /\b(800|833|844|855|866|877|888)[\s.\-]\d{3}[\s.\-]\d{4}\b/;
@@ -1852,7 +1949,7 @@ async function extractBusinessInfo(html, domain) {
 
   const schema = extractSchemaOrg(html);
   const socialSignals = extractSocialSignals(html, schema);
-  const structuredAddresses = extractStructuredAddress(html);
+  // structuredAddresses no longer used — address inference handled by LLM fallback
   const enhancedNames = extractEnhancedBusinessName(html);
   const cheerioName = extractBusinessNameCheerio(html);
 
@@ -2011,15 +2108,14 @@ async function extractBusinessInfo(html, domain) {
   }
   contact.emails = contact.emails.filter(e => !/filler@|noreply@|no-reply@|donotreply@|placeholder/i.test(e));
 
+  // ── NAME: regex body-text fallback ───────────────────────────
+  // Fires only when all DOM/schema fast-paths returned a weak result.
+  // Uses NAME_KEYWORD_RE (hoisted module constant, compiled once).
   const nameIsSlug = businessName && !businessName.includes(' ') && businessName.length > 6;
-  // FIX: recompute overlap fresh — businessName may have been updated by H1/legalName/enhancedNames
-  // above. The old code captured currentNameOverlap before those updates, so a valid H1 like
-  // "DAVCO MASONRY, LLC." would still have overlap=0 computed from the stale title-parsed name,
-  // causing nameRegex to fire unnecessarily and overwrite with nav-link fragments.
   const currentNameOverlap = countDomainOverlap(businessName);
 
   if (!businessName || businessName.length < 5 || businessName.toLowerCase() === domain.toLowerCase() || nameIsSlug || currentNameOverlap === 0) {
-    const nameRegex = /([A-Z][A-Za-z0-9&'.]{0,40}(?:[ \t]+[A-Za-z0-9&'.]+){0,6}[ \t]+(?:LLC|Inc\.?|Corp\.?|Corporation|Company|Services?|Solutions?|Repair|Removal|Junk\s+Removal|Plumbing|Mechanical|Management|Systems|Associates|Group|Partners|Enterprises?|Construction|Restoration|Properties|Realty|Holdings|Builders?|Hauling|Disposal|Electric(?:al)?|Roofing|Heating|Cooling|Landscaping|Painting|Contracting|Agency|Consulting|Studio|Design|Media|Logistics|Moving|Storage|Cleaning|Flooring|Paving|Fencing|Welding|Towing|Auto|Dental|Legal|Financial|Insurance|Advisors?|Interiors?|Exteriors?|Renovations?|Inspections?|Demolition|Excavat(?:ing|ion)|University|College|Institute|Academy|School|Seminary|Polytechnic|Center|Centre|Foundation|Hospital|Clinic|Church|Ministry|Ministries|Museum|Library|Laboratory|Labs?)(?:[ \t]+LLC|\.?)?)/g;
+    const nameRegex = new RegExp(NAME_KEYWORD_RE.source, NAME_KEYWORD_RE.flags);
     let nameCandidate = null;
     let bestCandidateScore = -1;
     let nm;
@@ -2028,24 +2124,16 @@ async function extractBusinessInfo(html, domain) {
       const words = candidate.toLowerCase().split(/\s+/);
       const wordCounts = {};
       words.forEach(w => { wordCounts[w] = (wordCounts[w] || 0) + 1; });
-      const maxRepeat = Math.max(...Object.values(wordCounts));
-      if (maxRepeat >= 3) continue;
-      if (/\b(schedule|catalog|current|class|syllabus|curriculum|registration|enrollment|calendar|semester|tuition|financial aid)\b/i.test(candidate) && !/\b(University|College|Institute|Academy|School)\b/i.test(candidate)) continue;
-      const serviceWordCount = (candidate.match(/\b(services?|solutions?|products?|features?|resources?|information|directory|portal|support|help|news|events?|programs?|departments?)\b/gi) || []).length;
-      if (serviceWordCount >= 2) continue;
-      // FIX: reject nav-link service-description fragments — these are page titles
-      // like "Foundation Plastering", "Bowed & Failing Foundation Walls", "Basement
-      // Drainage Systems & Pumps" that appear in navigation menus. They match the
-      // keyword list (Foundation, Plastering, etc.) but are not business names.
-      // Guard: if the candidate starts with a generic service/descriptive word
-      // and does NOT contain any domain word, skip it.
-      const startsWithServiceWord = /^(Foundation|Bowed|Failing|Basement|Exterior|Interior|Historical|Industrial|Commercial|Sidewalk|Walkway|Driveway|Blockwork|Brick|Stucco|Drainage|Waterproof|Stamped|Regular|Concrete|Asphalt|Masonry\s+Restoration|Stone\s+Masonry)/i.test(candidate);
+      if (Math.max(...Object.values(wordCounts)) >= 3) continue;
+      if (/\b(schedule|catalog|current|class|syllabus|curriculum|registration|enrollment|calendar|semester|tuition)\b/i.test(candidate) && !/\b(University|College|Institute|Academy|School)\b/i.test(candidate)) continue;
+      const svcWords = (candidate.match(/\b(services?|solutions?|products?|features?|resources?|information|directory|portal|support|help|news|events?|programs?|departments?)\b/gi) || []).length;
+      if (svcWords >= 2) continue;
       const overlap = countDomainOverlap(candidate);
-      if (startsWithServiceWord && overlap === 0) continue;
+      if (SERVICE_START_RE.test(candidate) && overlap === 0) continue;
       if (candidate.length > 5 && candidate.length < 80 && !isBoilerplateName(candidate)) {
-        const hasLegalEntity = /\b(?:LLC|Inc\.?|Corp\.?|Corporation|Ltd|Company)\b/i.test(candidate);
+        const hasLegal = /\b(?:LLC|Inc[.]?|Corp[.]?|Corporation|Ltd|Company)\b/i.test(candidate);
         const hasInstitution = /\b(?:University|College|Institute|Academy|School|Seminary|Polytechnic|Hospital|Foundation)\b/i.test(candidate);
-        if (overlap === 0 && !hasLegalEntity && !hasInstitution) continue;
+        if (overlap === 0 && !hasLegal && !hasInstitution) continue;
         const capWords = (candidate.match(/\b[A-Z][a-z]/g) || []).length;
         let score = overlap * 100 + capWords * 5 + Math.min(candidate.length, 50);
         if (hasInstitution) score += 30;
@@ -2053,126 +2141,81 @@ async function extractBusinessInfo(html, domain) {
       }
     }
     if (nameCandidate) businessName = nameCandidate;
-    else if (schema.address?.raw) address = parseUSAddress(schema.address.raw);
   }
 
+  // ── ADDRESS: regex inference from body text ───────────────────
+  // Tries city+state+zip pattern first (most reliable), then
+  // full street address pattern, then structured addresses from DOM.
   if (!address.street) {
-    const cityStateZipMatch = bodyText.match(/(?:^|[\n\r,.|]\s*)([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){0,2}),?\s*([A-Za-z]{2})\s*(\d{5})\b/m);
-    if (cityStateZipMatch) {
-      const candidateCity = cityStateZipMatch[1].trim();
-      const candidateState = cityStateZipMatch[2].toUpperCase();
-      const candidateZip = cityStateZipMatch[3];
-      const notACity = /LLC|Inc|Corp|Repair|Service|Plumbing|Mechanical|Management|Company|Group|Associates|Home|Commercial|Residential|the|and|for|your|this|terms|privacy|rights|contact|email|phone|subscribe|newsletter|sign\s*up/i;
-      if (!notACity.test(candidateCity) && candidateCity.length >= 3 && candidateCity.length <= 40 && US_STATE_CODES.includes(candidateState)) {
-        if (!address.city) address.city = candidateCity;
-        if (!address.state) address.state = candidateState;
-        if (!address.zip) address.zip = candidateZip;
+    const czMatch = bodyText.match(/(?:^|[\n\r,.|]\s*)([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){0,2}),?\s*([A-Za-z]{2})\s*(\d{5})\b/m);
+    if (czMatch) {
+      const cCity = czMatch[1].trim(), cState = czMatch[2].toUpperCase(), cZip = czMatch[3];
+      if (!NOT_A_CITY_RE.test(cCity) && cCity.length >= 3 && cCity.length <= 40 && US_STATE_CODES.includes(cState)) {
+        if (!address.city)  address.city  = cCity;
+        if (!address.state) address.state = cState;
+        if (!address.zip)   address.zip   = cZip;
       }
     }
     if (!address.city) {
-      const fullStateMatch = bodyText.match(/(?:^|[\n\r,.|]\s*)([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){0,2}),?\s*([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+)?)\s+(\d{5})\b/m);
-      if (fullStateMatch) {
-        const stateNameRaw = fullStateMatch[2].trim();
-        const stateCode = Object.entries(US_STATES).find(([,name]) => name.toLowerCase() === stateNameRaw.toLowerCase())?.[0];
-        if (stateCode) { address.city = fullStateMatch[1].trim(); address.state = stateCode; address.zip = fullStateMatch[3]; }
+      const fsMatch = bodyText.match(/(?:^|[\n\r,.|]\s*)([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){0,2}),?\s*([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+)?)\s+(\d{5})\b/m);
+      if (fsMatch) {
+        const stCode = Object.entries(US_STATES).find(([,n]) => n.toLowerCase() === fsMatch[2].trim().toLowerCase())?.[0];
+        if (stCode) { address.city = fsMatch[1].trim(); address.state = stCode; address.zip = fsMatch[3]; }
       }
     }
     if (!address.city) {
-      const cityStateOnlyMatch = bodyText.match(/(?:^|[\n\r,.|]\s*)([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){0,2}),?\s*([A-Za-z]{2})\b/m);
-      if (cityStateOnlyMatch) {
-        const candidateCity = cityStateOnlyMatch[1].trim();
-        const candidateState = cityStateOnlyMatch[2].toUpperCase();
-        const notACity = /LLC|Inc|Corp|Repair|Service|Plumbing|Mechanical|Management|Company|the|and|for|your|this|terms|privacy|rights|contact|email|phone/i;
-        if (!notACity.test(candidateCity) && candidateCity.length >= 3 && candidateCity.length <= 40 && US_STATE_CODES.includes(candidateState)) {
-          address.city = candidateCity; address.state = candidateState;
-        }
+      const csMatch = bodyText.match(/(?:^|[\n\r,.|]\s*)([A-Za-z][A-Za-z.'-]+(?:\s+[A-Za-z][A-Za-z.'-]+){0,2}),?\s*([A-Za-z]{2})\b/m);
+      if (csMatch) {
+        const cCity = csMatch[1].trim(), cState = csMatch[2].toUpperCase();
+        if (!NOT_A_CITY_RE.test(cCity) && cCity.length >= 3 && cCity.length <= 40 && US_STATE_CODES.includes(cState))
+          { address.city = cCity; address.state = cState; }
       }
     }
   }
 
-  const addrMatch = bodyText.match(/(?:^|[\n\r\s])(\d{1,6}\s+[A-Za-z][A-Za-z0-9\s.#'&/,-]{1,85}?\s+(?:Street|St\.?|Avenue|Ave\.?|Boulevard|Blvd\.?|Drive|Dr\.?|Road|Rd\.?|Lane|Ln\.?|Way|Court|Ct\.?|Place|Pl\.?|Circle|Cir\.?|Trail|Trl\.?|Parkway|Pkwy\.?|Highway|Hwy\.?|Terrace|Ter\.?|Pike)\.?(?:,?\s+(?:Suite|Ste\.?|Bldg\.?|Building|Unit|Apt\.?|Floor|Fl\.?)\s*[#]?[A-Za-z0-9-]+)?)(?:,?\s*[A-Za-z][A-Za-z\s.'-]{1,40},?\s*[A-Za-z]{2}\s*\d{5}(?:-\d{4})?)?/im);
+  // Street address pattern (number + street type suffix)
+  const addrMatch = bodyText.match(/(?:^|[\n\r\s])(\d{1,6}\s+[A-Za-z][A-Za-z0-9\s.#'&/,-]{1,85}?\s+(?:Street|St[.]?|Avenue|Ave[.]?|Boulevard|Blvd[.]?|Drive|Dr[.]?|Road|Rd[.]?|Lane|Ln[.]?|Way|Court|Ct[.]?|Place|Pl[.]?|Circle|Cir[.]?|Trail|Trl[.]?|Parkway|Pkwy[.]?|Highway|Hwy[.]?|Terrace|Ter[.]?|Pike)[.]?(?:,?\s+(?:Suite|Ste[.]?|Bldg[.]?|Building|Unit|Apt[.]?|Floor|Fl[.]?)\s*[#]?[A-Za-z0-9-]+)?)(?:,?\s*[A-Za-z][A-Za-z\s.'-]{1,40},?\s*[A-Za-z]{2}\s*\d{5}(?:-\d{4})?)?/im);
   if (addrMatch) {
-    const rawMatch = (addrMatch[0] || '').substring(0, 200).trim();
-    const parsed = parseUSAddress(rawMatch);
+    const parsed = parseUSAddress((addrMatch[0] || '').substring(0, 200).trim());
     if (parsed.street) {
-      parsed.street = parsed.street.replace(/\s{2,}/g, ' ').replace(/^((?:\S+\s+){4,})(?:LLC|Inc\.?|Corp\.?|Co\.?|Ltd\.?|Company|Services?|Repair|Plumbing|Mechanical)\b.*/i, '$1').trim();
+      parsed.street = parsed.street.replace(/\s{2,}/g, ' ').trim();
+      const sw = parsed.street.split(/\s+/);
+      const nonAddr = /^(of|with|the|for|and|or|but|why|how|when|what|that|this|to|in|on|at|by|from|years|days|months)$/i;
+      if (sw.length >= 3 && nonAddr.test(sw[2])) parsed.street = '';
     }
-    if (parsed.street) {
-      const streetWords = parsed.street.split(/\s+/);
-      const nonAddrWords = /^(of|with|the|for|and|or|but|why|how|when|what|that|this|to|in|on|at|by|from|years|days|months|reasons|ways|steps|things|tips|over|under|more|less|than|our|your|we|us|my|their|its|has|have|was|were|is|are|been|will|can|not|no|new|old|about|after|before|since|until|while|where|which)$/i;
-      if (streetWords.length >= 3 && nonAddrWords.test(streetWords[2])) parsed.street = '';
-    }
-    const validStates = new Set(['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY']);
-    if (parsed.state && validStates.has(parsed.state)) {
+    const validSt = new Set(['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY']);
+    if (parsed.state && validSt.has(parsed.state)) {
       if (!address.street && parsed.street) address.street = parsed.street;
-      if (!address.city && parsed.city) address.city = parsed.city;
-      if (!address.state && parsed.state) address.state = parsed.state;
-      if (!address.zip && parsed.zip) address.zip = parsed.zip;
+      if (!address.city  && parsed.city)   address.city   = parsed.city;
+      if (!address.state && parsed.state)  address.state  = parsed.state;
+      if (!address.zip   && parsed.zip)    address.zip    = parsed.zip;
     } else if (parsed.street && !address.street) {
       address.street = parsed.street;
     }
   }
 
-  if (!address.street && structuredAddresses.length > 0) {
-    for (const sa of structuredAddresses) {
-      if (sa.raw) {
-        const parsed = parseUSAddress(sa.raw);
-        if (parsed.street && parsed.street.length > 5) {
-          const streetWords = parsed.street.split(/\s+/);
-          const nonAddrWords = /^(of|with|the|for|and|or|but|why|how|when|what|that|this|to|in|on|at|by|from|years|days|months|reasons|ways|steps|things|tips|over|under|more|less|than|our|your|we|us|my|their)$/i;
-          if (streetWords.length < 3 || !nonAddrWords.test(streetWords[2])) {
-            if (!address.street) address.street = parsed.street;
-            if (!address.city && parsed.city) address.city = parsed.city;
-            if (!address.state && parsed.state) address.state = parsed.state;
-            if (!address.zip && parsed.zip) address.zip = parsed.zip;
-            break;
-          }
-        }
-      } else if (sa.street || sa.city) {
-        if (!address.street && sa.street) address.street = sa.street;
-        if (!address.city && sa.city) address.city = sa.city;
-        if (!address.state && sa.state) address.state = sa.state;
-        if (!address.zip && sa.zip) address.zip = sa.zip ? String(sa.zip) : '';
-        break;
-      }
-    }
-  }
-
-  if (address.street && (!address.city || !address.state)) {
-    for (const sa of structuredAddresses) {
-      if (sa.city && !address.city) address.city = sa.city;
-      if (sa.state && !address.state) address.state = sa.state;
-      if (sa.zip && !address.zip) address.zip = String(sa.zip);
-    }
-  }
-
   if (address.zip && /^\d{4}$/.test(address.zip)) address.zip = '0' + address.zip;
 
-  const country = detectCountry(html, domain, schema.address, contact.phones);
-
-  const metaDescMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([\s\S]*?)["']/i);
-  const metaDescription = metaDescMatch ? decodeHTML(metaDescMatch[1].trim()) : og.description ? decodeHTML(og.description) : schema.description ? decodeHTML(schema.description) : null;
-  const businessType = schema.type || null;
-
+  // Final name cleanup
   if (businessName && businessName !== domain) {
-    businessName = businessName.replace(/\s*[—–]\s*[A-Z][A-Za-z\s\-]{2,}$/, '').trim();
-    businessName = businessName.replace(/\s+[a-z][a-z\s\-]{15,}$/i, (match) => {
-      if (/\b(of|at|in|for|and|the)\s+[A-Z]/.test(match)) return match;
-      return '';
-    }).trim();
-    if (businessName.length > 60 && businessName.split(/\s+/).length > 8) {
-      const shortened = businessName.replace(/\s+(Schedule|Catalog|Directory|Portal|Resources?|Information|Enrollment|Registration|Services?|TitleIX).*$/i, '').trim();
-      if (shortened.length > 3 && shortened.length < businessName.length) businessName = shortened;
-    }
+    businessName = businessName.replace(/\s*[—–]\s*[A-Z][A-Za-z\s-]{2,}$/, '').trim();
     if (/[—–|]/.test(businessName) && businessName.length > 30) {
       const parts = businessName.split(/\s*[—–|]\s*/).filter(p => p.length > 2);
       if (parts.length >= 2) {
-        let bestPart = parts[0]; let bestOverlap = countDomainOverlap(parts[0]);
-        for (let i = 1; i < parts.length; i++) { const ov = countDomainOverlap(parts[i]); if (ov > bestOverlap) { bestOverlap = ov; bestPart = parts[i]; } }
-        businessName = bestPart;
+        let best = parts[0], bestOv = countDomainOverlap(parts[0]);
+        for (let i = 1; i < parts.length; i++) { const ov = countDomainOverlap(parts[i]); if (ov > bestOv) { bestOv = ov; best = parts[i]; } }
+        businessName = best;
       }
     }
   }
+
+  const country = detectCountry(html, domain, schema.address, contact.phones);
+  const metaDescription = (
+    $('meta[name="description"]').attr('content') ||
+    og.description ||
+    schema.description || null
+  ) ? decodeHTML($('meta[name="description"]').attr('content') || og.description || schema.description || '') : null;
+  const businessType = schema.type || null;
 
   const normalizedBusiness = { businessName, rawTitle, metaDescription, businessType, phones:contact.phones.slice(0,3), emails:contact.emails.slice(0,3), address, country, schema:{ hasSchema:!!schema.name, rating:schema.rating, priceRange:schema.priceRange, hours:schema.hours.length>0?schema.hours:null }, og:{ siteName:og.siteName, image:og.image }, socialSignals };
   return { ...normalizedBusiness, strength: buildBusinessStrengthSignals(normalizedBusiness) };
