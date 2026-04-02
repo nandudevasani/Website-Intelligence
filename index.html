@@ -234,8 +234,8 @@ function socialIconBtn(s){
   return '<a href="'+E(s.url)+'" target="_blank" rel="noopener" class="social-icon-btn '+cls+'" title="'+E(s.platform)+'">'+ic+'</a>';
 }
 function isValidDomain(d){
-  d=d.trim().toLowerCase().replace(/^(https?:\/\/)/,'').replace(/\/.*$/,'').replace(/^www\./,'');
-  return /^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)*\.[a-z]{2,}$/i.test(d);
+  d=d.trim().toLowerCase().replace(/^https?:[/][/]/,'').replace(/[/].*/,'').replace(/^www[.]/,'');
+  return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?[.])+[a-z]{2,}$/i.test(d);
 }
 function validateSingle(){
   const d=document.getElementById('single-input').value.trim();
