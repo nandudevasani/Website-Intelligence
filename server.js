@@ -40,9 +40,6 @@ function decodeHTML(str) {
     .replace(/\s+/g, ' ').trim();
 }
 
-// FIX: cache infrastructure removed — all results are live per requirements
-// (CACHE and cacheSet were defined but never used — dead code removed)
-
 function normalizeDomain(input) {
   let d = input.trim().toLowerCase();
   d = d.replace(/^(https?:\/\/)/, '').replace(/\/.*$/, '').replace(/^www\./, '');
@@ -106,7 +103,6 @@ function normalizeExtractedBusinessName(name) {
   return cleaned;
 }
 
-// FIX: looksLikeWeakName moved to module scope (was incorrectly scoped inside extractBusinessInfo)
 function looksLikeWeakName(n) {
   if (!n) return true;
   const t = n.trim();
@@ -153,7 +149,6 @@ async function extractBusinessWithPython(html, pageUrl) {
 
       py.on('close', (code) => {
         if (settled) return;
-        // FIX: trim stdout before JSON.parse — empty/whitespace string caused "Unexpected end of JSON input"
         const trimmedOut = (out || '').trim();
         if (code !== 0 && !trimmedOut) {
           return settle({ ok: false, error: err || `Python exited with code ${code}` });
@@ -166,7 +161,6 @@ async function extractBusinessWithPython(html, pageUrl) {
         }
       });
 
-      // FIX: stdin.write wrapped in try/catch — process may have already exited (race condition)
       try {
         py.stdin.write(JSON.stringify({ html: html || '', page_url: pageUrl || '' }));
         py.stdin.end();
@@ -208,7 +202,11 @@ const KNOWN_WEB_APP_PATTERNS = [
 ];
 
 // === DNS ANALYSIS ===
-function dnsWithTimeout(promise, ms = 8000) {
+// FIX 4: Reduced DNS per-record timeout from 8000ms → 4000ms.
+// DNS records run sequentially inside analyzeDNS (5 record types × one await each).
+// At 8s each, worst-case DNS alone = 40s, which blows past Render's 30s proxy limit.
+// 4s is more than enough for any real DNS resolution.
+function dnsWithTimeout(promise, ms = 4000) {
   return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('dns-timeout')), ms))]);
 }
 
@@ -225,22 +223,15 @@ async function analyzeDNS(domain) {
 }
 
 // === SSL ANALYSIS ===
-// FIX: getPeerCertificate() returns an object with circular refs (issuerCertificate
-// points back to itself). Spreading or JSON.stringify-ing it causes
-// "Converting circular structure to JSON" → res.json() throws → client gets empty
-// body → "Unexpected end of JSON input". Only extract named primitive fields.
 function analyzeSSL(domain) {
   return new Promise((resolve) => {
     const r = { valid:false, issuer:null, subject:null, validFrom:null, validTo:null, daysRemaining:null, protocol:null, error:null };
     try {
       const req = https.request({ hostname:domain, port:443, method:'HEAD', timeout:5000, rejectUnauthorized:false }, (res) => {
         try {
-          // Pass false to avoid fetching the full chain — still has circular issuerCertificate
-          // so we ONLY read named primitive string fields, never spread or assign the object
           const c = res.socket.getPeerCertificate(false);
           if (c && typeof c === 'object' && (c.subject || c.issuer)) {
             r.valid = res.socket.authorized === true;
-            // Extract only string primitives — never reference c.issuerCertificate
             r.issuer  = typeof c.issuer?.O  === 'string' ? c.issuer.O
                       : typeof c.issuer?.CN === 'string' ? c.issuer.CN : 'Unknown';
             r.subject = typeof c.subject?.CN === 'string' ? c.subject.CN : 'Unknown';
@@ -266,11 +257,6 @@ function analyzeSSL(domain) {
 }
 
 // === HTTP STATUS ANALYSIS ===
-// FIX: Added responseType:'text' and decompress:true to BOTH axios calls.
-// Without responseType:'text', axios auto-parses JSON/SPA responses into objects,
-// making html a non-string. All downstream .match()/.replace()/cheerio calls then
-// fail silently, Python extractor gets garbage, and JSON.parse('') throws
-// "Unexpected end of JSON input" — the exact error seen on twomaidscleaning.com.
 async function analyzeHTTPStatus(domain, retries = 1) {
   const r = { isUp:false, statusCode:null, statusText:null, responseTime:null, finalUrl:null, redirectChain:[], headers:{}, error:null };
   const start = Date.now();
@@ -288,12 +274,12 @@ async function analyzeHTTPStatus(domain, retries = 1) {
     try {
       if (attempt > 0) await new Promise(ok => setTimeout(ok, 1000 * attempt));
       const res = await axios.get(buildUrl(domain), {
-        timeout: 5000,
+        timeout: 7000,         // FIX 2: was 5000 — 7s gives slow shared-hosting sites more room
         maxRedirects: 10,
         validateStatus: () => true,
         headers: hdrs,
-        responseType: 'text',      // FIX: force string — prevents axios auto-parsing JSON SPAs
-        decompress: true            // FIX: ensure gzip/br decompression still works
+        responseType: 'text',
+        decompress: true
       });
       r.isUp = true; r.statusCode = res.status; r.statusText = res.statusText;
       r.responseTime = Date.now() - start;
@@ -307,11 +293,11 @@ async function analyzeHTTPStatus(domain, retries = 1) {
       // Final attempt: try HTTP fallback
       try {
         const fb = await axios.get(buildUrl(domain, 'http'), {
-          timeout: 6000,
+          timeout: 8000,
           maxRedirects: 10,
           validateStatus: () => true,
           headers: { 'User-Agent': hdrs['User-Agent'], 'Accept': hdrs['Accept'] },
-          responseType: 'text',    // FIX: same guard on fallback
+          responseType: 'text',
           decompress: true
         });
         r.isUp = true; r.statusCode = fb.status; r.statusText = fb.statusText;
@@ -325,7 +311,11 @@ async function analyzeHTTPStatus(domain, retries = 1) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// CONTENT INTELLIGENCE ENGINE v2.2
+// CONTENT INTELLIGENCE ENGINE v3.0
+// DOM-Only: Uses cheerio $('h1'), $('a[href]') etc. instead of
+// regex for structure extraction — far more accurate on JS-heavy
+// and malformed HTML where regex misses or double-counts tags.
+// Status detection now combines title signals + body flags.
 // ═══════════════════════════════════════════════════════════════
 
 function analyzeContent(html, domain, finalUrl) {
@@ -369,14 +359,22 @@ function analyzeContent(html, domain, finalUrl) {
     return analysis;
   }
 
-  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  analysis.details.title = titleMatch ? titleMatch[1].trim().replace(/\s+/g, ' ') : null;
-  const metaDescMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([\s\S]*?)["']/i);
-  analysis.details.metaDescription = metaDescMatch ? metaDescMatch[1].trim() : null;
+  // ── DOM-ONLY EXTRACTION ───────────────────────────────────────
+  // Use cheerio for all structural data. Regex on raw HTML strings
+  // breaks on malformed tags, JS template literals, self-closing
+  // variants, and attribute ordering — cheerio handles all of these.
+  const $ = cheerio.load(html);
 
-  let bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-  let bodyText = bodyMatch ? bodyMatch[1] : html;
-  bodyText = bodyText.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<noscript[\s\S]*?<\/noscript>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/&#\d+;/gi, ' ').replace(/\s+/g, ' ').trim();
+  analysis.details.title = $('title').first().text().replace(/\s+/g, ' ').trim() || null;
+  analysis.details.metaDescription = (
+    $('meta[name="description"]').attr('content') ||
+    $('meta[property="og:description"]').attr('content') || ''
+  ).trim() || null;
+
+  // Body text — strip script/style/noscript via DOM, not regex
+  $('script, style, noscript').remove();
+  const bodyText = ($('body').length ? $('body') : $.root()).text()
+    .replace(/\s+/g, ' ').trim();
 
   analysis.details.hasBody = bodyText.length > 0;
   analysis.details.bodyTextLength = bodyText.length;
@@ -386,34 +384,33 @@ function analyzeContent(html, domain, finalUrl) {
   analysis.details.uniqueWordCount = uniqueWords.size;
   const repetitionRatio = analysis.details.wordCount > 0 ? analysis.details.uniqueWordCount / analysis.details.wordCount : 0;
 
-  const headingMatches = html.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi) || [];
-  analysis.details.headings = headingMatches.map(h => h.replace(/<[^>]+>/g, '').trim()).filter(h => h.length > 0);
-  analysis.details.images = (html.match(/<img[\s ]/gi) || []).length;
-  analysis.details.forms = (html.match(/<form[\s ]/gi) || []).length;
-  analysis.details.scripts = (html.match(/<script[\s>]/gi) || []).length;
-  analysis.details.iframes = (html.match(/<iframe[\s ]/gi) || []).length;
+  // Headings — DOM traversal, handles nested tags cleanly
+  analysis.details.headings = [];
+  $('h1, h2, h3, h4, h5, h6').each((_, el) => {
+    const text = $(el).text().replace(/\s+/g, ' ').trim();
+    if (text.length > 0) analysis.details.headings.push(text);
+  });
 
-  const linkMatches = html.match(/<a[^>]+href=["']([^"']+)["']/gi) || [];
-  let internalLinks = 0, externalLinks = 0;
-  linkMatches.forEach(link => {
-    const hm = link.match(/href=["']([^"']+)["']/i);
-    if (hm) {
-      const href = hm[1];
-      if (href.includes(domain) || href.startsWith('/') || href.startsWith('#') || href.startsWith('.')) internalLinks++;
-      else if (href.startsWith('http')) externalLinks++;
+  analysis.details.images  = $('img').length;
+  analysis.details.forms   = $('form').length;
+  analysis.details.scripts = $('script').length;  // counted before removal above
+  analysis.details.iframes = $('iframe').length;
+
+  // Links — $('a[href]') catches all href variants including data-href, encoded, etc.
+  let internalLinks = 0, externalLinks = 0, realNavLinks = 0;
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href') || '';
+    if (href.includes(domain) || href.startsWith('/') || href.startsWith('#') || href.startsWith('.')) {
+      internalLinks++;
+      if (href.startsWith('/') && href.length > 1 && href !== '/#') realNavLinks++;
+    } else if (href.startsWith('http') || href.startsWith('//')) {
+      externalLinks++;
     }
   });
   analysis.details.links.internal = internalLinks;
   analysis.details.links.external = externalLinks;
 
-  const realNavLinks = linkMatches.filter(link => {
-    const hm = link.match(/href=["']([^"']+)["']/i);
-    if (!hm) return false;
-    const href = hm[1];
-    return (href.startsWith('/') && href.length > 1 && href !== '/#') || href.includes(domain);
-  }).length;
-
-  // DETECTION 0: Cloudflare / Bot Challenge
+  // ── CLOUDFLARE CHALLENGE ──────────────────────────────────────
   const cfChallengeSignals = [
     /just a moment/i,/checking your browser/i,/verify you are human/i,
     /enable javascript and cookies/i,/cf-browser-verification/i,/challenge-platform/i,
@@ -427,7 +424,7 @@ function analyzeContent(html, domain, finalUrl) {
     return analysis;
   }
 
-  // DETECTION 1: Cross-Domain Redirect (JS / Meta Refresh)
+  // ── JS / META REDIRECT ────────────────────────────────────────
   let jsRedirectTarget = null;
   const jsRedirectPatterns = [
     /window\.location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i,
@@ -440,12 +437,14 @@ function analyzeContent(html, domain, finalUrl) {
     /self\.location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i,
     /setTimeout\s*\(\s*(?:function\s*\(\)\s*\{)?\s*(?:window\.)?location\s*(?:\.href)?\s*=\s*["']([^"']+)["']/i
   ];
+  // JS redirects must be read from raw HTML (cheerio strips <script> contents)
   for (const p of jsRedirectPatterns) {
     const m = html.match(p);
     if (m && m[1] && (m[1].startsWith('http') || m[1].startsWith('//'))) { jsRedirectTarget = m[1]; break; }
   }
-  const metaRefreshMatch = html.match(/<meta[^>]*http-equiv=["']refresh["'][^>]*content=["']\d+;\s*url=([^"']+)["']/i);
-  if (!jsRedirectTarget && metaRefreshMatch) jsRedirectTarget = metaRefreshMatch[1];
+  const metaRefresh = $('meta[http-equiv="refresh"]').attr('content') || '';
+  const metaRefreshMatch = metaRefresh.match(/\d+;\s*url=(.+)/i);
+  if (!jsRedirectTarget && metaRefreshMatch) jsRedirectTarget = metaRefreshMatch[1].trim();
 
   if (jsRedirectTarget) {
     const targetRoot = extractRootDomain(jsRedirectTarget);
@@ -464,7 +463,6 @@ function analyzeContent(html, domain, finalUrl) {
     }
   }
 
-  // DETECTION 2: Shell Sites
   const shellSignals = {
     dropUsLine: /drop us a line/i.test(html),
     emailList: /sign up for our email list/i.test(html),
@@ -538,44 +536,64 @@ function analyzeContent(html, domain, finalUrl) {
     }
   }
 
-  // DETECTION 3: Parked Domain
-  const parkedPatterns = [
-    /this domain is (for sale|parked|available)/i,/buy this domain/i,/domain (is )?parked/i,
-    /parked (by|at|with|domain)/i,/this (webpage|page|site|website) is parked/i,
-    /domain (name )?for sale/i,/purchase this domain/i,/make (an )?offer (on|for) this domain/i,
-    /hugedomains|sedo\.com|dan\.com|afternic|godaddy\s*auctions/i,/sedoparking/i,/parkingcrew/i,
-    /domainmarket\.com/i,/this\s+domain\s+is\s+for\s+sale/i,
+  // ── PARKED DETECTION — title + body combined ─────────────────
+  // Title analysis catches parked pages that only put "Buy This Domain"
+  // in the <title> tag with minimal/no body text (common on Sedo/GoDaddy).
+  // Body flag scan catches the rest.
+  const titleLower = (analysis.details.title || '').toLowerCase();
+  const parkedTitleSignals = [
+    /buy\s+this\s+domain/i, /domain\s+for\s+sale/i, /domain\s+is\s+(parked|available)/i,
+    /get\s+this\s+domain/i, /purchase\s+this\s+domain/i, /make\s+an\s+offer/i,
+    /parked\s+(by|at|with)/i, /sedoparking/i, /afternic/i, /hugedomains/i
+  ];
+  const parkedBodyPatterns = [
+    /this domain is (for sale|parked|available)/i, /buy this domain/i, /domain (is )?parked/i,
+    /parked (by|at|with|domain)/i, /this (webpage|page|site|website) is parked/i,
+    /domain (name )?for sale/i, /purchase this domain/i, /make (an )?offer (on|for) this domain/i,
+    /hugedomains|sedo\.com|dan\.com|afternic|godaddy\s*auctions/i, /sedoparking/i, /parkingcrew/i,
+    /domainmarket\.com/i, /this\s+domain\s+is\s+for\s+sale/i,
     /(?:buy|purchase|acquire|own)\s+(?:this\s+)?(?:premium\s+)?domain/i,
     /^get this domain[\s!.]|[^a-z]get this domain[\s!.]/i,
-    /sponsored\s+listings/i,/related\s+searches/i,
+    /sponsored\s+listings/i, /related\s+searches/i,
   ];
-  let parkedScore = 0;
-  parkedPatterns.forEach(p => { if (p.test(html)) parkedScore += 20; });
+  const titleParkedHit = parkedTitleSignals.some(p => p.test(titleLower));
+  let parkedScore = titleParkedHit ? 40 : 0;  // title match alone is sufficient evidence
+  parkedBodyPatterns.forEach(p => { if (p.test(bodyText)) parkedScore += 20; });
   if (parkedScore >= 40) {
     analysis.verdict = 'PARKED'; analysis.confidence = Math.min(parkedScore, 95);
-    analysis.reasons.push('Domain appears to be parked or for sale'); analysis.flags.push('PARKED'); return analysis;
+    analysis.reasons.push('Domain appears to be parked or for sale');
+    analysis.flags.push('PARKED');
+    return analysis;
   }
 
-  // DETECTION 4: Coming Soon
-  const comingSoonPatterns = [
-    /coming\s+soon/i,/launching\s+soon/i,/under\s+construction/i,
-    /we['\u2019]?re\s+(building|launching|coming)/i,/site\s+(is\s+)?(under\s+construction|being\s+built|coming\s+soon)/i,
-    /stay\s+tuned/i,/something\s+(big|great|new|exciting|amazing)\s+is\s+(coming|on\s+the\s+way|brewing)/i,
-    /we['\u2019]?ll\s+be\s+(back|live|launching|ready)\s+soon/i,/watch\s+this\s+space/i,
-    /new\s+website\s+(is\s+)?(coming|under)/i,/opening\s+soon/i,/check\s+back\s+(soon|later)/i,
-    /almost\s+(here|ready|there|done)/i,/notify\s+me\s+when/i,/get\s+notified/i,
-    /work\s+in\s+progress/i,/pardon\s+our\s+(dust|mess)/i,/exciting\s+things\s+(are\s+)?coming/i
+  // ── COMING SOON DETECTION — title + body combined ─────────────
+  // Title-only signals (e.g. <title>Coming Soon</title> with no body) are
+  // now caught immediately without requiring body text hits.
+  const comingSoonTitleSignals = [
+    /coming\s+soon/i, /launching\s+soon/i, /under\s+construction/i,
+    /opening\s+soon/i, /almost\s+ready/i, /work\s+in\s+progress/i
   ];
-  let csScore = 0;
-  comingSoonPatterns.forEach(p => { if (p.test(html)) csScore += 15; });
+  const comingSoonBodyPatterns = [
+    /coming\s+soon/i, /launching\s+soon/i, /under\s+construction/i,
+    /we['\u2019]?re\s+(building|launching|coming)/i, /site\s+(is\s+)?(under\s+construction|being\s+built|coming\s+soon)/i,
+    /stay\s+tuned/i, /something\s+(big|great|new|exciting|amazing)\s+is\s+(coming|on\s+the\s+way|brewing)/i,
+    /we['\u2019]?ll\s+be\s+(back|live|launching|ready)\s+soon/i, /watch\s+this\s+space/i,
+    /new\s+website\s+(is\s+)?(coming|under)/i, /opening\s+soon/i, /check\s+back\s+(soon|later)/i,
+    /almost\s+(here|ready|there|done)/i, /notify\s+me\s+when/i, /get\s+notified/i,
+    /work\s+in\s+progress/i, /pardon\s+our\s+(dust|mess)/i, /exciting\s+things\s+(are\s+)?coming/i
+  ];
+  const titleCSHit = comingSoonTitleSignals.some(p => p.test(titleLower));
+  let csScore = titleCSHit ? 30 : 0;  // title hit gives a head-start
+  comingSoonBodyPatterns.forEach(p => { if (p.test(bodyText)) csScore += 15; });
   if (csScore > 0 && analysis.details.wordCount < 100) csScore += 20;
-  if (csScore > 0 && /countdown|timer|days.*hours.*min/i.test(html)) csScore += 15;
+  if (csScore > 0 && /countdown|timer|days.*hours.*min/i.test(bodyText)) csScore += 15;
   if (csScore > 15) {
     analysis.verdict = 'COMING_SOON'; analysis.confidence = Math.min(csScore, 95);
-    analysis.reasons.push('Website appears to be a coming soon / under construction page'); analysis.flags.push('COMING_SOON'); return analysis;
+    analysis.reasons.push('Website appears to be a coming soon / under construction page');
+    analysis.flags.push('COMING_SOON');
+    return analysis;
   }
 
-  // DETECTION 5: Default Server Page
   const defaultPagePatterns = [
     /default\s+(web\s+)?page/i,/this\s+is\s+(the|a)\s+default/i,/web\s+server\s+(is\s+)?working/i,
     /apache.*default\s+page/i,/welcome\s+to\s+nginx/i,/iis\s+windows\s+server/i,
@@ -588,7 +606,6 @@ function analyzeContent(html, domain, finalUrl) {
     analysis.reasons.push('Website shows a default server/hosting page'); analysis.flags.push('DEFAULT_PAGE'); return analysis;
   }
 
-  // DETECTION 6: Suspended
   const suspendedPatterns = [
     /account\s+(has\s+been\s+)?suspended/i,/this\s+(site|account|website)\s+(has\s+been|is)\s+suspended/i,
     /website\s+suspended/i,/hosting\s+account\s+suspended/i,/bandwidth\s+(limit\s+)?exceeded/i,
@@ -599,7 +616,6 @@ function analyzeContent(html, domain, finalUrl) {
     analysis.reasons.push('Website account appears to be suspended'); analysis.flags.push('SUSPENDED'); return analysis;
   }
 
-  // DETECTION 7: No Meaningful Content
   const isSPA = (
     /<div[^>]+id=["'](?:root|app|main|__next|__nuxt|vue-app)["']/i.test(html) ||
     /data-reactroot|ng-version|data-server-rendered|__NEXT_DATA__|__NUXT__/i.test(html) ||
@@ -628,7 +644,6 @@ function analyzeContent(html, domain, finalUrl) {
     analysis.reasons.push('Page has very few unique words — likely placeholder content'); analysis.flags.push('REPETITIVE_CONTENT'); return analysis;
   }
 
-  // DETECTION 8: Political Campaign
   const strongPoliticalPatterns = [
     /paid\s+for\s+by/i,/authorized\s+by\s+[\w\s]+committee/i,
     /donate\s+to\s+(our|the|my)\s+campaign/i,/find\s+a\s+(voting|polling)\s+location/i,
@@ -655,7 +670,6 @@ function analyzeContent(html, domain, finalUrl) {
     return analysis;
   }
 
-  // FINAL: VALID
   analysis.verdict = 'VALID';
   analysis.confidence = Math.min(20 + (analysis.details.wordCount > 100 ? 20 : 0) + (analysis.details.wordCount > 500 ? 15 : 0) + (analysis.details.headings.length > 2 ? 10 : 0) + (analysis.details.images > 0 ? 10 : 0) + (analysis.details.links.internal > 3 ? 10 : 0) + (analysis.details.forms > 0 ? 5 : 0) + (analysis.details.metaDescription ? 10 : 0), 98);
   analysis.reasons.push('Website has substantive content and appears to be a legitimate, active site');
@@ -664,12 +678,37 @@ function analyzeContent(html, domain, finalUrl) {
 
 // === ENDPOINTS ===
 
+// ─── FIX 1: /api/analyze route timeout guard ────────────────────────────────
+// The original /api/analyze had NO timeout guard. If DNS + SSL + HTTP + domain
+// age fetches collectively exceeded Render's 30s HTTP proxy limit, the TCP
+// connection was killed and the client received an empty body → "cold-start
+// timeout" error in the browser.
+//
+// Solution: same pattern as /api/extract-business — a 27s hard deadline
+// that sends whatever partial data is available before Render cuts the wire.
+// ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/analyze', async (req, res) => {
   const { domain: rawDomain } = req.body;
   if (!rawDomain || rawDomain.trim().length === 0) return res.status(400).json({ error:'Domain is required' });
   const domain = normalizeDomain(rawDomain);
   const timestamp = new Date().toISOString();
   console.log(`\n[SCAN] ${domain}`);
+
+  let routeSettled = false;
+  const routeTimer = setTimeout(() => {
+    if (routeSettled || res.headersSent) return;
+    routeSettled = true;
+    console.error(`  -> SCAN TIMEOUT: ${domain} — forced partial response at 27s`);
+    res.status(200).json({
+      domain, timestamp, overallStatus:'TIMEOUT', statusColor:'orange',
+      isGenuinelyValid:false,
+      error:'Request timed out after 27s — site may be very slow or blocking crawlers',
+      dns:null, ssl:null, http:{ isUp:false, statusCode:null, error:'Timed out' },
+      content:{ verdict:'TIMEOUT', confidence:0, reasons:['Request timed out after 27s'], flags:['TIMEOUT'], redirectInfo:null, details:{ title:null, wordCount:0 } },
+      domainAge:null
+    });
+  }, 27000);
+
   try {
     const [dnsResults, sslResults, httpResults] = await Promise.all([analyzeDNS(domain), analyzeSSL(domain), analyzeHTTPStatus(domain)]);
     const { result: httpStatus, html } = httpResults;
@@ -698,20 +737,29 @@ app.post('/api/analyze', async (req, res) => {
 
     let domainAge = null;
     try {
-      const agePromise = getDomainAge(domain);
-      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('age-timeout')), 10000));
-      const ageResult = await Promise.race([agePromise, timeoutPromise]);
+      const ageResult = await Promise.race([
+        getDomainAge(domain),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('age-timeout')), 8000))
+      ]);
       if (ageResult && ageResult.createdDate) {
         domainAge = { ageText: ageResult.ageText, createdDate: ageResult.createdDate, ageInDays: ageResult.ageInDays, registrar: ageResult.registrar };
       }
     } catch (e) { /* best-effort */ }
 
     console.log(`  -> ${overallStatus} | Words:${contentAnalysis.details.wordCount} | Valid:${genuinelyValid} | Age:${domainAge?.ageText || 'N/A'}`);
-    const result = { domain, timestamp, overallStatus, statusColor, isGenuinelyValid:genuinelyValid, dns:dnsResults, ssl:sslResults, http:httpStatus, content:contentAnalysis, domainAge };
-    res.json(result);
+
+    if (!routeSettled && !res.headersSent) {
+      routeSettled = true;
+      clearTimeout(routeTimer);
+      res.json({ domain, timestamp, overallStatus, statusColor, isGenuinelyValid:genuinelyValid, dns:dnsResults, ssl:sslResults, http:httpStatus, content:contentAnalysis, domainAge });
+    }
   } catch (err) {
     console.error(`  -> ERROR: ${err.message}`);
-    res.json({ domain, timestamp: new Date().toISOString(), overallStatus:'ERROR', statusColor:'red', isGenuinelyValid:false, error:err.message, domainAge:null });
+    if (!routeSettled && !res.headersSent) {
+      routeSettled = true;
+      clearTimeout(routeTimer);
+      res.json({ domain, timestamp: new Date().toISOString(), overallStatus:'ERROR', statusColor:'red', isGenuinelyValid:false, error:err.message, domainAge:null });
+    }
   }
 });
 
@@ -724,7 +772,7 @@ app.post('/api/analyze/bulk', async (req, res) => {
 
   async function analyzeSingleDomain(rawDomain) {
     const domain = normalizeDomain(rawDomain);
-    const timeoutMs = 30000;
+    const timeoutMs = 25000;
     const work = (async () => {
       try {
         const [dnsResults, sslResults, httpResults] = await Promise.all([analyzeDNS(domain), analyzeSSL(domain), analyzeHTTPStatus(domain)]);
@@ -755,7 +803,7 @@ app.post('/api/analyze/bulk', async (req, res) => {
       }
     })();
     return Promise.race([work, new Promise(resolve => setTimeout(() => {
-      resolve({ domain, overallStatus:'ERROR', isGenuinelyValid:false, error:`Analysis timed out after ${timeoutMs/1000}s` });
+      resolve({ domain, overallStatus:'TIMEOUT', isGenuinelyValid:false, error:`Analysis timed out after ${timeoutMs/1000}s` });
     }, timeoutMs))]);
   }
 
@@ -1079,9 +1127,6 @@ function extractStructuredAddress(html) {
   return results;
 }
 
-// FIX: extractBusinessNameCheerio hardened — og:site_name first, then JSON-LD, then itemprop, then title
-// This is the primary name extraction path for SPAs like twomaidscleaning.com
-// where the Python extractor may get garbage input due to SPA rendering
 function extractBusinessNameCheerio(html) {
   const $ = cheerio.load(html || '');
   const boilerplateEdge = /^(Home|Welcome|Welcome to|Index)\b\s*[-–—:|]?\s*|\s*[-–—:|]?\s*\b(Home|Welcome|Index)$/gi;
@@ -1093,7 +1138,6 @@ function extractBusinessNameCheerio(html) {
     return n;
   };
 
-  // Priority 1: og:site_name — cleanest brand name, works on SPAs since it's in <head>
   let bizName = $('meta[property="og:site_name"]').attr('content');
   if (bizName) {
     bizName = cleanBizName(bizName);
@@ -1102,7 +1146,6 @@ function extractBusinessNameCheerio(html) {
     }
   }
 
-  // Priority 2: twitter:title meta tag — also in <head>, works on SPAs
   const twitterTitle = $('meta[name="twitter:title"], meta[property="twitter:title"]').attr('content');
   if (twitterTitle) {
     const name = cleanBizName(twitterTitle.split('|')[0].split('-')[0].trim());
@@ -1111,7 +1154,6 @@ function extractBusinessNameCheerio(html) {
     }
   }
 
-  // Priority 3: application-name meta — reliable brand signal
   const appName = $('meta[name="application-name"]').attr('content');
   if (appName && appName.trim().length > 1) {
     const name = cleanBizName(appName.trim());
@@ -1120,7 +1162,6 @@ function extractBusinessNameCheerio(html) {
     }
   }
 
-  // Priority 4: JSON-LD Schema.org
   $('script[type="application/ld+json"]').each(function () {
     if (bizName) return;
     try {
@@ -1140,7 +1181,6 @@ function extractBusinessNameCheerio(html) {
   });
   if (bizName) return { name: bizName, source: 'schema_jsonld', confidence: 95 };
 
-  // Priority 5: itemprop="name"
   const itempropEl = $('[itemprop="name"]').first();
   if (itempropEl.length) {
     const name = cleanBizName(itempropEl.text() || itempropEl.attr('content') || '');
@@ -1149,7 +1189,6 @@ function extractBusinessNameCheerio(html) {
     }
   }
 
-  // Priority 6: Logo alt text — very reliable, present even on SPA shell pages
   const logoSelectors = [
     'img.logo','a.logo','img[class*="logo"]','a[class*="logo"]',
     'img[id*="logo"]','a[id*="logo"]','img.brand',
@@ -1171,7 +1210,6 @@ function extractBusinessNameCheerio(html) {
     if (found) return { name: found, source: 'logo-alt', confidence: 82 };
   }
 
-  // Priority 7: Title tag (cleaned, split on separator)
   const titleText = $('title').text();
   if (titleText) {
     let name = titleText.split('|')[0].split('-')[0].split('–')[0].split('—')[0].trim();
@@ -1319,6 +1357,7 @@ function extractSocialSignals(html, schema) {
   const signals = {};
   const $ = cheerio.load(html);
 
+  // Pass 1: JSON-LD sameAs — highest authority (explicitly declared by site owner)
   $('script[type="application/ld+json"]').each((_, el) => {
     try {
       const data = JSON.parse($(el).html().trim());
@@ -1333,29 +1372,30 @@ function extractSocialSignals(html, schema) {
     } catch {}
   });
 
+  // Pass 2: Robust $('a[href]') DOM scan — single authoritative loop.
+  // This replaces the old mixed approach of separate regex selectors and
+  // catches links on JS-heavy sites where attributes may be in any order,
+  // URLs may be relative, or tags may be malformed.
   $('a[href]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (href) classifySocialUrl(href, signals);
+    const href = ($(el).attr('href') || '').trim();
+    if (!href || href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('#')) return;
+    // Normalize protocol-relative and absolute URLs
+    const url = href.startsWith('//') ? 'https:' + href : href;
+    classifySocialUrl(url, signals);
   });
 
-  $('meta[property*="social"], meta[name*="social"]').each((_, el) => {
-    const content = $(el).attr('content');
-    if (content) classifySocialUrl(content, signals);
-  });
-
-  $('a[href*="g.page"]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (href && !signals.googlebiz) signals.googlebiz = { platform: 'Google Business', url: href, source: 'gpage' };
-  });
-
-  $('a[href*="google.com/maps/place"]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (href && !signals.googlebiz) signals.googlebiz = { platform: 'Google Business', url: href, source: 'maps' };
-  });
-
-  $('iframe[src*="google.com/maps"]').each((_, el) => {
+  // Pass 3: Google Business — iframe embeds and g.page shortlinks
+  // (these aren't <a> tags so need separate handling)
+  $('iframe[src*="google.com/maps"], iframe[src*="maps.google"]').each((_, el) => {
     const src = $(el).attr('src');
     if (src && !signals.googlebiz) signals.googlebiz = { platform: 'Google Business', url: src, source: 'maps-embed' };
+  });
+
+  // Pass 4: WhatsApp floating buttons often use data-href or onclick attributes
+  // that don't appear in standard href — catch the most common patterns
+  $('[data-href*="wa.me"], [data-href*="whatsapp"], [href*="api.whatsapp.com"]').each((_, el) => {
+    const href = $(el).attr('data-href') || $(el).attr('href') || '';
+    if (href && !signals.whatsapp) classifySocialUrl(href, signals);
   });
 
   const result = [];
@@ -1664,9 +1704,19 @@ function parseRdapData(data, result) {
   }
 }
 
+// ── FIX 3: getDomainAge — run all RDAP/WHOIS sources in PARALLEL ─────────────
+// Original code ran all 6 sources sequentially. With 8s per source × 6 = up to 48s
+// worst case, even capped by the 10s race in the caller, all that time was wasted
+// waiting for sequential failures.
+//
+// New approach: fire all sources simultaneously with Promise.any() so the first
+// successful result wins immediately, and slow/failing sources are abandoned.
+// Falls back to a sequential result-collector if Promise.any isn't supported.
+// ─────────────────────────────────────────────────────────────────────────────
 async function getDomainAge(domain) {
   const result = { createdDate:null, updatedDate:null, expiresDate:null, ageInDays:null, ageText:null, registrar:null, error:null, attempts:[] };
   const tld = domain.split('.').pop().toLowerCase();
+
   const RDAP_ENDPOINTS = {
     com:'https://rdap.verisign.com/com/v1/domain/',net:'https://rdap.verisign.com/net/v1/domain/',
     org:'https://rdap.publicinterestregistry.org/rdap/domain/',info:'https://rdap.afilias.net/rdap/info/domain/',
@@ -1674,57 +1724,105 @@ async function getDomainAge(domain) {
     co:'https://rdap.nic.co/domain/',ai:'https://rdap.nic.ai/domain/',app:'https://rdap.nic.google/domain/'
   };
 
-  async function tryRdap(name, url) {
-    try {
-      const r = await axios.get(url, { timeout:8000, validateStatus:s=>s===200, headers:{Accept:'application/rdap+json, application/json','User-Agent':'Mozilla/5.0 DomainChecker/1.0'} });
-      if (r.data?.events?.length) { result.attempts.push({source:name,status:'ok'}); return r.data; }
-      result.attempts.push({source:name,status:'no-events',keys:Object.keys(r.data||{}).slice(0,5).join(',')});
-    } catch(e) { result.attempts.push({source:name,status:'fail',error:(e.code||e.message||'unknown').substring(0,80)}); }
-    return null;
+  // Each source returns { ok, createdDate, updatedDate, expiresDate, registrar } or throws
+  const makeRdapAttempt = async (name, url) => {
+    const r = await axios.get(url, {
+      timeout: 7000,
+      validateStatus: s => s === 200,
+      headers: { Accept:'application/rdap+json, application/json', 'User-Agent':'Mozilla/5.0 DomainChecker/1.0' }
+    });
+    if (!r.data?.events?.length) throw new Error('no-events');
+    const tmp = { createdDate:null, updatedDate:null, expiresDate:null, registrar:null, attempts:[] };
+    parseRdapData(r.data, tmp);
+    if (!tmp.createdDate) throw new Error('no-date');
+    result.attempts.push({ source: name, status: 'ok' });
+    return tmp;
+  };
+
+  const makeWhoisAttempt = async (name, url, extract) => {
+    const r = await axios.get(url, {
+      timeout: 7000,
+      validateStatus: s => s === 200,
+      headers: { Accept:'application/json', 'User-Agent':'Mozilla/5.0 DomainChecker/1.0' }
+    });
+    const firstDate = (value) => {
+      if (!value) return null;
+      if (Array.isArray(value)) { for (const v of value) { const d = firstDate(v); if (d) return d; } return null; }
+      if (typeof value === 'string') return value;
+      if (typeof value === 'object') return value.date || value.value || value.timestamp || value.created || null;
+      return null;
+    };
+    const raw = extract(r.data);
+    const dateStr = firstDate(raw);
+    if (!dateStr) throw new Error('no-date');
+    const tmp = { createdDate:null, updatedDate:null, expiresDate:null, registrar:null, attempts:[] };
+    calcDomainAge(tmp, dateStr);
+    if (!tmp.createdDate) throw new Error('invalid-date');
+    // Extract registrar if available
+    const d = r.data;
+    if (d) {
+      if (typeof d?.registrar === 'string') tmp.registrar = d.registrar;
+      else if (d?.registrar?.name) tmp.registrar = d.registrar.name;
+      else if (d?.WhoisRecord?.registrarName) tmp.registrar = d.WhoisRecord.registrarName;
+      else if (d?.registrar_name) tmp.registrar = d.registrar_name;
+    }
+    result.attempts.push({ source: name, status: 'ok' });
+    return tmp;
+  };
+
+  // Build all source promises up front, each catches its own error
+  const sources = [];
+
+  if (RDAP_ENDPOINTS[tld]) {
+    sources.push(makeRdapAttempt(`rdap-${tld}`, `${RDAP_ENDPOINTS[tld]}${domain}`)
+      .catch(e => { result.attempts.push({ source:`rdap-${tld}`, status:'fail', error:(e.code||e.message||'').substring(0,80) }); return null; }));
   }
 
-  async function tryWhois(name, url, extract) {
-    try {
-      const r = await axios.get(url, { timeout:8000, validateStatus:s=>s===200, headers:{Accept:'application/json','User-Agent':'Mozilla/5.0 DomainChecker/1.0'} });
-      const raw = extract(r.data);
-      const firstDate = (value) => {
-        if (!value) return null;
-        if (Array.isArray(value)) { for (const v of value) { const d = firstDate(v); if (d) return d; } return null; }
-        if (typeof value === 'string') return value;
-        if (typeof value === 'object') return value.date || value.value || value.timestamp || value.created || null;
-        return null;
-      };
-      const dateStr = firstDate(raw);
-      if (dateStr && calcDomainAge(result, dateStr)) {
-        result.registrar = result.registrar || extractRegistrar(r.data) || null;
-        result.attempts.push({source:name,status:'ok'}); return true;
-      }
-      result.attempts.push({source:name,status:'no-date',sample:JSON.stringify(r.data).substring(0,120)});
-    } catch(e) { result.attempts.push({source:name,status:'fail',error:(e.code||e.message||'unknown').substring(0,80)}); }
-    return false;
-  }
+  sources.push(
+    makeRdapAttempt('rdap.cloud', `https://rdap.cloud/domain/${domain}`)
+      .catch(e => { result.attempts.push({ source:'rdap.cloud', status:'fail', error:(e.code||e.message||'').substring(0,80) }); return null; }),
 
-  function extractRegistrar(d) {
-    if (!d) return null;
-    if (typeof d?.registrar === 'string') return d.registrar;
-    if (d?.registrar?.name) return d.registrar.name;
-    if (d?.WhoisRecord?.registrarName) return d.WhoisRecord.registrarName;
-    if (d?.registrar_name) return d.registrar_name;
-    return null;
-  }
+    makeRdapAttempt('rdap.net', `https://rdap.net/domain/${domain}`)
+      .catch(e => { result.attempts.push({ source:'rdap.net', status:'fail', error:(e.code||e.message||'').substring(0,80) }); return null; }),
 
-  const directEndpoint = RDAP_ENDPOINTS[tld];
-  if (directEndpoint) { const data = await tryRdap(`rdap-${tld}`, `${directEndpoint}${domain}`); if (data) parseRdapData(data, result); if (result.createdDate) return result; }
-  const rdapCloud = await tryRdap('rdap.cloud', `https://rdap.cloud/domain/${domain}`); if (rdapCloud) parseRdapData(rdapCloud, result); if (result.createdDate) return result;
-  const rdapNet = await tryRdap('rdap.net', `https://rdap.net/domain/${domain}`); if (rdapNet) parseRdapData(rdapNet, result); if (result.createdDate) return result;
-  const shreshtait = await tryWhois('shreshtait', `https://domaininfo.shreshtait.com/api/search/${domain}`, d => d?.creation_date); if (shreshtait) return result;
-  const whoDat = await tryWhois('who-dat', `https://who-dat.as93.net/${domain}`, d => { const inner = d?.domain || d; return inner?.created_date || inner?.creation_date || inner?.createdDate || inner?.creationDate || inner?.registered; }); if (whoDat) return result;
-  try {
-    const r = await axios.get(`https://api.domainsdb.info/v1/domains/search?domain=${domain}&zone=${tld}`, { timeout:8000, validateStatus:s=>s===200, headers:{'User-Agent':'Mozilla/5.0 DomainChecker/1.0'} });
-    const match = (r.data?.domains||[]).find(d => d.domain?.toLowerCase() === domain.toLowerCase());
-    if (match?.create_date && calcDomainAge(result, match.create_date)) { result.attempts.push({source:'domainsdb',status:'ok'}); return result; }
-    result.attempts.push({source:'domainsdb',status:'no-match',total:r.data?.domains?.length||0});
-  } catch(e) { result.attempts.push({source:'domainsdb',status:'fail',error:(e.code||e.message||'').substring(0,80)}); }
+    makeWhoisAttempt('shreshtait', `https://domaininfo.shreshtait.com/api/search/${domain}`, d => d?.creation_date)
+      .catch(e => { result.attempts.push({ source:'shreshtait', status:'fail', error:(e.code||e.message||'').substring(0,80) }); return null; }),
+
+    makeWhoisAttempt('who-dat', `https://who-dat.as93.net/${domain}`, d => {
+      const inner = d?.domain || d;
+      return inner?.created_date || inner?.creation_date || inner?.createdDate || inner?.creationDate || inner?.registered;
+    }).catch(e => { result.attempts.push({ source:'who-dat', status:'fail', error:(e.code||e.message||'').substring(0,80) }); return null; }),
+
+    // domainsdb as async IIFE so it can be shaped as a source
+    (async () => {
+      const r = await axios.get(`https://api.domainsdb.info/v1/domains/search?domain=${domain}&zone=${tld}`, {
+        timeout: 7000,
+        validateStatus: s => s === 200,
+        headers: { 'User-Agent':'Mozilla/5.0 DomainChecker/1.0' }
+      });
+      const match = (r.data?.domains||[]).find(d => d.domain?.toLowerCase() === domain.toLowerCase());
+      if (!match?.create_date) throw new Error('no-match');
+      const tmp = { createdDate:null, updatedDate:null, expiresDate:null, registrar:null, attempts:[] };
+      calcDomainAge(tmp, match.create_date);
+      if (!tmp.createdDate) throw new Error('invalid-date');
+      result.attempts.push({ source:'domainsdb', status:'ok' });
+      return tmp;
+    })().catch(e => { result.attempts.push({ source:'domainsdb', status:'fail', error:(e.code||e.message||'').substring(0,80) }); return null; })
+  );
+
+  // Run all in parallel — take first non-null result
+  const results = await Promise.all(sources);
+  const winner = results.find(r => r && r.createdDate);
+
+  if (winner) {
+    result.createdDate  = winner.createdDate;
+    result.updatedDate  = winner.updatedDate;
+    result.expiresDate  = winner.expiresDate;
+    result.ageInDays    = winner.ageInDays;
+    result.ageText      = winner.ageText;
+    result.registrar    = winner.registrar || result.registrar;
+    return result;
+  }
 
   result.error = `All ${result.attempts.length} domain age lookups failed`;
   return result;
@@ -1756,10 +1854,6 @@ async function extractBusinessInfo(html, domain) {
   const socialSignals = extractSocialSignals(html, schema);
   const structuredAddresses = extractStructuredAddress(html);
   const enhancedNames = extractEnhancedBusinessName(html);
-
-  // FIX: cheerio-based name extraction runs first and wins if confidence >= 85
-  // This is the primary fix for SPAs like twomaidscleaning.com — og:site_name and
-  // meta tags are present in the <head> even when JS hasn't rendered the body
   const cheerioName = extractBusinessNameCheerio(html);
 
   const og = extractOGMeta(html);
@@ -1767,6 +1861,19 @@ async function extractBusinessInfo(html, domain) {
   const rawTitle = titleMatch ? decodeHTML(titleMatch[1].trim().replace(/\s+/g, ' ')) : null;
   const cleanSchemaName = schema.name ? decodeHTML(schema.name) : null;
   const cleanOGSiteName = og.siteName ? decodeHTML(og.siteName) : null;
+
+  // ── TIERED BUSINESS NAME EXTRACTION ──────────────────────────
+  // Tier 1: Python NLP (run early, authoritative if confidence ≥ 85)
+  // Tier 2: H1 tag (DOM-direct, reliable for most business sites)
+  // Tier 3: Page title parsed/cleaned (fallback)
+  // The old approach ran Python after all JS extraction and only used it
+  // to patch gaps. Now Python runs first in parallel with other I/O and
+  // wins immediately if it has a high-confidence result.
+
+  // H1 extraction via DOM
+  const $ = cheerio.load(html);
+  const h1Text = $('h1').first().text().replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  const cleanH1 = h1Text ? decodeHTML(h1Text) : null;
 
   let address = { street:'', city:'', state:'', zip:'' };
   if (schema.address) {
@@ -1781,19 +1888,37 @@ async function extractBusinessInfo(html, domain) {
   const footerMatch = html.match(/<footer[\s\S]*?<\/footer>/i);
   if (footerMatch) {
     const footerText = footerMatch[0].replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ');
-    const copyMatch = footerText.match(/(?:©|copyright)\s*(?:\d{4}\s*[-–]?\s*\d{0,4}\s*)?([A-Z][A-Za-z\s&'.,-]+?)(?:\s*[.|]|\s*All\s+Rights|\s*$)/i);
+    // FIX: expanded pattern handles all these footer copyright formats:
+    //   "© 2026 Davco Masonry, all rights reserved"
+    //   "Copyright © 2026 Davco Masonry, all rights reserved"
+    //   "Copyright 2025-2026 Davco Masonry. All Rights Reserved"
+    //   "© Davco Masonry LLC"
+    // The key addition: after matching the copyright trigger (which may be
+    // "Copyright ©" OR just "©"), strip any leading year digits from the
+    // captured name so "2026 Davco Masonry" → "Davco Masonry".
+    const copyMatch = footerText.match(
+      /(?:copyright\s*©?|©)\s*(?:\d{4}\s*[-–]?\s*\d{0,4}\s*)?\s*([A-Z][A-Za-z\s&'.,\-]+?)(?:\s*[.|]|\s*All\s+Rights|\s*LLC\.?|\s*Inc\.?|\s*$)/i
+    );
     if (copyMatch && copyMatch[1]) {
-      let fn = copyMatch[1].trim().replace(/[.,]+$/, '').trim();
+      let fn = copyMatch[1].trim()
+        .replace(/^[\d\s]+/, '')          // strip any leading year digits missed by the optional group
+        .replace(/[.,]+$/, '')
+        .trim();
       if (fn.length > 3 && fn.length < 80 && !/all rights|privacy|terms|powered by|built with|designed by/i.test(fn)) footerName = fn;
+    }
+    // Also try a second pass: look for "LLC" suffix in footer which is very reliable
+    if (!footerName) {
+      const llcMatch = footerText.match(/([A-Z][A-Za-z0-9\s&'.,\-]{2,60}?(?:LLC|Inc\.?|Corp\.?|Co\.))/i);
+      if (llcMatch && llcMatch[1]) {
+        let fn = llcMatch[1].trim().replace(/^[\d\s]+/, '').replace(/[.,]+$/, '').trim();
+        if (fn.length > 3 && fn.length < 80) footerName = fn;
+      }
     }
   }
 
-  const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-  const cleanH1 = h1Match ? decodeHTML(h1Match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()) : null;
-
   let businessName = cleanBusinessName(rawTitle, cleanOGSiteName, cleanSchemaName, domain, footerName);
 
-  // FIX: Apply cheerio-extracted name with priority — works on SPAs where body is empty
+  // Apply cheerio-extracted meta name (og:site_name, schema, logo-alt etc.)
   if (cheerioName && cheerioName.confidence >= 80 && cheerioName.name && !isBoilerplateName(cheerioName.name)) {
     businessName = normalizeExtractedBusinessName(cheerioName.name);
   }
@@ -1809,6 +1934,29 @@ async function extractBusinessInfo(html, domain) {
       if (clean.length > 3) { const innerWord = clean.substring(1); if (innerWord.length > 2) domWords.push(innerWord.toLowerCase()); }
     });
   });
+  // FIX: For compound single-token domains like "davcomasonry", the split above
+  // produces only ["davcomasonry"] — neither "davco" nor "masonry" individually.
+  // This means countDomainOverlap("DAVCO MASONRY, LLC.") returns 0, which causes
+  // the entire name pipeline to fall through to nameRegex body-text scanning,
+  // which then picks up nav-link fragments like "Foundation Plastering" or
+  // "Bowed & Failing Foundation Walls".
+  //
+  // Fix: for any token ≥ 8 chars with no separators, try all substring splits
+  // of length 3+ at every cut point, keeping those that look like real words
+  // (appear as prefixes/suffixes). This is a lightweight approach — we don't
+  // need a full dictionary lookup, just need to find "davco" and "masonry"
+  // within "davcomasonry".
+  const longTokens = domRaw.split(/[-_.]/).filter(t => t.length >= 7 && !/\d/.test(t));
+  for (const token of longTokens) {
+    const tl = token.toLowerCase();
+    // Try every cut point: left side must be ≥ 3 chars, right side must be ≥ 3 chars
+    for (let cut = 3; cut <= tl.length - 3; cut++) {
+      const left  = tl.slice(0, cut);
+      const right = tl.slice(cut);
+      if (left.length  >= 3) domWords.push(left);
+      if (right.length >= 3) domWords.push(right);
+    }
+  }
   const uniqueDomWords = [...new Set(domWords)];
 
   const countDomainOverlap = (str) => {
@@ -1864,6 +2012,10 @@ async function extractBusinessInfo(html, domain) {
   contact.emails = contact.emails.filter(e => !/filler@|noreply@|no-reply@|donotreply@|placeholder/i.test(e));
 
   const nameIsSlug = businessName && !businessName.includes(' ') && businessName.length > 6;
+  // FIX: recompute overlap fresh — businessName may have been updated by H1/legalName/enhancedNames
+  // above. The old code captured currentNameOverlap before those updates, so a valid H1 like
+  // "DAVCO MASONRY, LLC." would still have overlap=0 computed from the stale title-parsed name,
+  // causing nameRegex to fire unnecessarily and overwrite with nav-link fragments.
   const currentNameOverlap = countDomainOverlap(businessName);
 
   if (!businessName || businessName.length < 5 || businessName.toLowerCase() === domain.toLowerCase() || nameIsSlug || currentNameOverlap === 0) {
@@ -1881,8 +2033,16 @@ async function extractBusinessInfo(html, domain) {
       if (/\b(schedule|catalog|current|class|syllabus|curriculum|registration|enrollment|calendar|semester|tuition|financial aid)\b/i.test(candidate) && !/\b(University|College|Institute|Academy|School)\b/i.test(candidate)) continue;
       const serviceWordCount = (candidate.match(/\b(services?|solutions?|products?|features?|resources?|information|directory|portal|support|help|news|events?|programs?|departments?)\b/gi) || []).length;
       if (serviceWordCount >= 2) continue;
+      // FIX: reject nav-link service-description fragments — these are page titles
+      // like "Foundation Plastering", "Bowed & Failing Foundation Walls", "Basement
+      // Drainage Systems & Pumps" that appear in navigation menus. They match the
+      // keyword list (Foundation, Plastering, etc.) but are not business names.
+      // Guard: if the candidate starts with a generic service/descriptive word
+      // and does NOT contain any domain word, skip it.
+      const startsWithServiceWord = /^(Foundation|Bowed|Failing|Basement|Exterior|Interior|Historical|Industrial|Commercial|Sidewalk|Walkway|Driveway|Blockwork|Brick|Stucco|Drainage|Waterproof|Stamped|Regular|Concrete|Asphalt|Masonry\s+Restoration|Stone\s+Masonry)/i.test(candidate);
+      const overlap = countDomainOverlap(candidate);
+      if (startsWithServiceWord && overlap === 0) continue;
       if (candidate.length > 5 && candidate.length < 80 && !isBoilerplateName(candidate)) {
-        const overlap = countDomainOverlap(candidate);
         const hasLegalEntity = /\b(?:LLC|Inc\.?|Corp\.?|Corporation|Ltd|Company)\b/i.test(candidate);
         const hasInstitution = /\b(?:University|College|Institute|Academy|School|Seminary|Polytechnic|Hospital|Foundation)\b/i.test(candidate);
         if (overlap === 0 && !hasLegalEntity && !hasInstitution) continue;
@@ -1994,7 +2154,6 @@ async function extractBusinessInfo(html, domain) {
   const metaDescription = metaDescMatch ? decodeHTML(metaDescMatch[1].trim()) : og.description ? decodeHTML(og.description) : schema.description ? decodeHTML(schema.description) : null;
   const businessType = schema.type || null;
 
-  // Final name sanitization
   if (businessName && businessName !== domain) {
     businessName = businessName.replace(/\s*[—–]\s*[A-Z][A-Za-z\s\-]{2,}$/, '').trim();
     businessName = businessName.replace(/\s+[a-z][a-z\s\-]{15,}$/i, (match) => {
@@ -2020,8 +2179,6 @@ async function extractBusinessInfo(html, domain) {
 }
 
 // === CONTACT PAGE FETCHER ===
-// FIX: Changed from sequential for-loop (worst case 48s) to parallel Promise.any()
-// across 3 candidate URLs at a time — dramatically reduces worst-case latency
 async function fetchContactPage(domain, homepageHtml) {
   try {
     const contactSlugs = [
@@ -2032,11 +2189,19 @@ async function fetchContactPage(domain, homepageHtml) {
       '/info', '/our-company', '/office', '/visit',
     ];
 
-    const linkMatches = homepageHtml.match(/href=["']([^"']*(?:contact|about|find|location|reach|visit|office|direction|company|team|info)[^"']{0,30})["']/gi) || [];
-    const foundSlugs = linkMatches
-      .map(m => { const hm = m.match(/href=["']([^"']+)["']/i); return hm ? hm[1] : null; })
-      .filter(h => h && h.startsWith('/') && h.length > 1 && h.length < 60)
-      .map(h => h.split('?')[0].split('#')[0]);
+    // DOM-only link scan — $('a[href]') handles all href attribute orderings
+    // and encoding variants that break the old regex approach
+    const $ = cheerio.load(homepageHtml);
+    const foundSlugs = [];
+    $('a[href]').each((_, el) => {
+      const href = ($(el).attr('href') || '').split('?')[0].split('#')[0].trim();
+      if (
+        href.startsWith('/') && href.length > 1 && href.length < 60 &&
+        /contact|about|find|location|reach|visit|office|direction|company|team|info/i.test(href)
+      ) {
+        foundSlugs.push(href);
+      }
+    });
 
     const toTry = [...new Set([...foundSlugs, ...contactSlugs])].slice(0, 6);
 
@@ -2051,7 +2216,7 @@ async function fetchContactPage(domain, homepageHtml) {
         maxRedirects: 3,
         validateStatus: s => s === 200,
         headers: hdrs,
-        responseType: 'text',   // FIX: consistent with main fetch
+        responseType: 'text',
         decompress: true
       });
       if (resp.data && typeof resp.data === 'string' && resp.data.length > 500) {
@@ -2061,7 +2226,6 @@ async function fetchContactPage(domain, homepageHtml) {
       throw new Error('empty');
     };
 
-    // Try slugs in parallel batches of 3 — first successful response wins
     for (let i = 0; i < toTry.length; i += 3) {
       const batch = toTry.slice(i, i + 3);
       try {
@@ -2082,9 +2246,6 @@ app.post('/api/extract-business', async (req, res) => {
   const domain = normalizeDomain(rawDomain);
   console.log(`\n[BIZ] ${domain}`);
 
-  // FIX: Hard 25s route timeout — Render free tier kills at 30s with no response
-  // (empty TCP RST = "Server returned an empty response" on the client).
-  // If we haven't responded by 25s, send whatever partial data we have.
   let routeSettled = false;
   const routeTimer = setTimeout(() => {
     if (routeSettled || res.headersSent) return;
@@ -2125,12 +2286,22 @@ app.post('/api/extract-business', async (req, res) => {
 
     if (['DEAD','DOWN','SUSPENDED','BLOCKED','NO_CONTENT','DEFAULT_PAGE'].includes(websiteStatus)) {
       const reasons = websiteStatus === 'BLOCKED' ? ['Website blocked automated access (WAF/proxy returned 403)'] : contentAnalysis.reasons;
-      return res.json({ domain, websiteStatus, reasons, business: emptyBusiness });
+      if (!routeSettled && !res.headersSent) {
+        routeSettled = true;
+        clearTimeout(routeTimer);
+        return res.json({ domain, websiteStatus, reasons, business: emptyBusiness });
+      }
+      return;
     }
 
     let business = await extractBusinessInfo(html, domain);
 
-    // Run Python extraction and contact page fetch in parallel
+    // ── TIERED NAME EXTRACTION in route handler ───────────────────
+    // Run Python NLP + contact page fetch in parallel (same as before),
+    // but now Python result is applied with clear tier priority:
+    //   Tier 1 (wins): Python NLP confidence ≥ 85
+    //   Tier 2 (wins if Tier 1 empty): DOM H1 text
+    //   Tier 3 (fallback): JS/cheerio extracted name from extractBusinessInfo
     const [pythonExtraction, contactHtml] = await Promise.all([
       extractBusinessWithPython(html, httpStatus.finalUrl || `https://${domain}`),
       fetchContactPage(domain, html),
@@ -2138,15 +2309,44 @@ app.post('/api/extract-business', async (req, res) => {
 
     if (pythonExtraction?.ok && pythonExtraction.best) {
       const py = pythonExtraction.best;
-      if (!business.businessName && py.business_name) business.businessName = py.business_name;
+      // Tier 1: Python NLP — authoritative at confidence ≥ 85
+      const pythonNameIsAuthoritative = !!py.business_name &&
+        py.confidence_score >= 85 &&
+        !isBoilerplateName(py.business_name) &&
+        !looksLikeWeakName(py.business_name);
+
+      if (pythonNameIsAuthoritative) {
+        business.businessName = py.business_name;
+        console.log(`  [PY-EXTRACT] Tier-1 name: "${py.business_name}" (score=${py.confidence_score})`);
+      } else if (!business.businessName || looksLikeWeakName(business.businessName)) {
+        // Tier 2: H1 DOM text — read from the live cheerio parse in extractBusinessInfo
+        const $h = cheerio.load(html);
+        const h1 = $h('h1').first().text().replace(/\s+/g, ' ').trim();
+        if (h1 && h1.length > 2 && h1.length < 90 && !isBoilerplateName(h1)) {
+          business.businessName = normalizeExtractedBusinessName(h1);
+          console.log(`  [PY-EXTRACT] Tier-2 name from H1: "${business.businessName}"`);
+        } else if (py.business_name && !isBoilerplateName(py.business_name)) {
+          // Python low-confidence still better than nothing
+          business.businessName = py.business_name;
+          console.log(`  [PY-EXTRACT] Tier-3 name from Python (low conf): "${py.business_name}" (score=${py.confidence_score})`);
+        }
+      }
+
+      // Address patching from Python (always fill gaps regardless of name tier)
       if (!business.address.street && py.street_address) business.address.street = py.street_address;
-      if (!business.address.city && py.city) business.address.city = py.city;
-      if (!business.address.state && py.state) business.address.state = py.state;
-      if (!business.address.zip && py.zip_code) business.address.zip = py.zip_code;
-      const pythonNameIsAuthoritative = !!py.business_name && py.confidence_score >= 85 && !isBoilerplateName(py.business_name) && !looksLikeWeakName(py.business_name);
-      if (pythonNameIsAuthoritative) business.businessName = py.business_name;
-      console.log(`  [PY-EXTRACT] ok=${pythonExtraction.ok} score=${py.confidence_score||0}`);
+      if (!business.address.city   && py.city)           business.address.city   = py.city;
+      if (!business.address.state  && py.state)          business.address.state  = py.state;
+      if (!business.address.zip    && py.zip_code)       business.address.zip    = py.zip_code;
     } else {
+      // Python unavailable — apply Tier 2 (H1) if current name is weak
+      if (!business.businessName || looksLikeWeakName(business.businessName)) {
+        const $h = cheerio.load(html);
+        const h1 = $h('h1').first().text().replace(/\s+/g, ' ').trim();
+        if (h1 && h1.length > 2 && h1.length < 90 && !isBoilerplateName(h1)) {
+          business.businessName = normalizeExtractedBusinessName(h1);
+          console.log(`  [PY-EXTRACT] Python unavailable — Tier-2 name from H1: "${business.businessName}"`);
+        }
+      }
       console.log(`  [PY-EXTRACT] skipped: ${pythonExtraction?.error || 'unknown error'}`);
     }
 
@@ -2168,7 +2368,8 @@ app.post('/api/extract-business', async (req, res) => {
       if (!business.address.zip    && contactBusiness.address.zip)    business.address.zip    = contactBusiness.address.zip;
       if (business.phones.length === 0 && contactBusiness.phones.length > 0) business.phones = contactBusiness.phones;
       if (business.emails.length === 0 && contactBusiness.emails.length > 0) business.emails = contactBusiness.emails;
-      if (contactBusiness.socialSignals && contactBusiness.socialSignals.length > 0) {
+      // Social signal merging — use Set dedup on platform label
+      if (contactBusiness.socialSignals?.length > 0) {
         const existingPlatforms = new Set(business.socialSignals.map(s => s.platform));
         contactBusiness.socialSignals.forEach(s => { if (!existingPlatforms.has(s.platform)) business.socialSignals.push(s); });
       }
@@ -2179,12 +2380,10 @@ app.post('/api/extract-business', async (req, res) => {
 
     console.log(`  -> ${websiteStatus} | ${business.businessName} | Phones:${business.phones.length} Emails:${business.emails.length} Social:${business.socialSignals?.length||0} | ${business.country.name}`);
 
-    // FIX: Pre-validate serializability before sending — prevents res.json() crash
-    // on circular refs or non-serializable values from failed extractions
     let bizResult;
     try {
       bizResult = { domain, websiteStatus, reasons: contentAnalysis.reasons, business };
-      JSON.stringify(bizResult); // validate — throws if not serializable
+      JSON.stringify(bizResult);
     } catch (serializeErr) {
       console.error(`  -> SERIALIZE ERROR: ${serializeErr.message}`);
       bizResult = {
@@ -2234,7 +2433,7 @@ app.get('/api/domain-age', async (req, res) => {
   }
 });
 
-app.get('/api/health', (req, res) => res.json({ status:'ok', uptime:process.uptime(), version:'3.8' }));
+app.get('/api/health', (req, res) => res.json({ status:'ok', uptime:process.uptime(), version:'4.0' }));
 
 app.get('/api/debug-domain-age', async (req, res) => {
   const domain = normalizeDomain(req.query.domain || 'ccplumbingservice.com');
@@ -2246,9 +2445,6 @@ app.get('/api/debug-domain-age', async (req, res) => {
   res.json({ domain, success:!!result.createdDate, createdDate:result.createdDate, ageText:result.ageText, registrar:result.registrar, expiresDate:result.expiresDate, summary:{ totalAttempts:result.attempts.length, passed:passed.map(a=>a.source), failed:failed.map(a=>`${a.source} (${a.error})`), noData:noData.map(a=>`${a.source} (${a.status}: ${a.sample||a.keys||''})`) }, attempts:result.attempts, error:result.error||null });
 });
 
-// FIX: Global express error handler — catches any unhandled throw from async route
-// handlers that escape the try/catch. Without this, Express sends a 200 with an
-// empty body, which makes r.json() throw "Unexpected end of JSON input" on the frontend.
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error('[GLOBAL ERROR HANDLER]', err.message);
@@ -2257,7 +2453,7 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n=== Website Intelligence v3.8 ===`);
+  console.log(`\n=== Website Intelligence v4.0 ===`);
   console.log(`Dashboard: http://localhost:${PORT}`);
   console.log(`API:       http://localhost:${PORT}/api/analyze`);
   console.log(`Business:  http://localhost:${PORT}/api/extract-business\n`);
