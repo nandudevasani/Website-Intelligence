@@ -2421,17 +2421,30 @@ app.post('/api/extract-business', async (req, res) => {
 
     business.strength = buildBusinessStrengthSignals(business);
 
-    console.log(`  -> ${websiteStatus} | ${business.businessName} | Phones:${business.phones.length} Emails:${business.emails.length} Social:${business.socialSignals?.length||0} | ${business.country.name}`);
+    // Fetch domain age in parallel-style (best-effort, capped at 8s)
+    let domainAge = null;
+    try {
+      const ageResult = await Promise.race([
+        getDomainAge(domain),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('age-timeout')), 8000))
+      ]);
+      if (ageResult?.createdDate) {
+        domainAge = { ageText: ageResult.ageText, createdDate: ageResult.createdDate, ageInDays: ageResult.ageInDays, registrar: ageResult.registrar };
+      }
+    } catch (e) { /* best-effort */ }
+
+    console.log(`  -> ${websiteStatus} | ${business.businessName} | Phones:${business.phones.length} Emails:${business.emails.length} Social:${business.socialSignals?.length||0} | ${business.country.name} | Age:${domainAge?.ageText||'N/A'}`);
 
     let bizResult;
     try {
-      bizResult = { domain, websiteStatus, reasons: contentAnalysis.reasons, business };
+      bizResult = { domain, websiteStatus, reasons: contentAnalysis.reasons, business, domainAge };
       JSON.stringify(bizResult);
     } catch (serializeErr) {
       console.error(`  -> SERIALIZE ERROR: ${serializeErr.message}`);
       bizResult = {
         domain, websiteStatus,
         reasons: ['Serialization error — partial data recovered'],
+        domainAge,
         business: {
           businessName: business?.businessName || '',
           phones: business?.phones || [],
