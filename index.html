@@ -293,14 +293,20 @@ function startKeepalive(){stopKeepalive();_keepaliveTimer=setInterval(async()=>{
 function stopKeepalive(){if(_keepaliveTimer){clearInterval(_keepaliveTimer);_keepaliveTimer=null}}
 
 async function warmup(){
-  const MAX=45000,INTERVAL=4000;const t0=Date.now();
+  // Render free tier cold-starts in 20-35s. We poll /api/health every 3s
+  // for up to 28s. If it never responds, we bail and let the actual domain
+  // request wake the server — the 27s route timeout handles any slowness.
+  // Reduced from 45s: users were seeing "41s remaining" countdowns which
+  // looked broken even though the server was just starting normally.
+  const MAX=28000,INTERVAL=3000;const t0=Date.now();
   while(Date.now()-t0<MAX){
     try{const r=await fetch(API+'/api/health',{signal:AbortSignal.timeout(INTERVAL-200)});
       if(r.ok){document.getElementById('loader-sub').textContent='Server ready ('+((Date.now()-t0)/1000).toFixed(1)+'s)';return true}}catch(e){}
-    document.getElementById('loader-sub').textContent='Waking server... ('+Math.ceil((MAX-(Date.now()-t0))/1000)+'s remaining)';
+    const elapsed=((Date.now()-t0)/1000).toFixed(0);
+    document.getElementById('loader-sub').textContent='Starting server... ('+elapsed+'s)';
     await new Promise(r=>setTimeout(r,300));
   }
-  document.getElementById('loader-sub').textContent='Server may be slow — proceeding...';return false;
+  document.getElementById('loader-sub').textContent='Starting first request...';return false;
 }
 
 async function fetchWithRetry(url,body,retries=1,signal=null){
