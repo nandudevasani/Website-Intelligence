@@ -289,7 +289,7 @@ const fmtV=v=>({VALID:'Genuine Active Website',PARKED:'Parked / For Sale',COMING
 const vC=v=>({VALID:'green',PARKED:'orange',COMING_SOON:'yellow',NO_CONTENT:'orange',DEFAULT_PAGE:'orange',SUSPENDED:'red',SHELL_SITE:'orange',CROSS_DOMAIN_REDIRECT:'red',POLITICAL_CAMPAIGN:'blue',BLOCKED:'orange'}[v]||'orange');
 const vE=v=>({VALID:'✅',PARKED:'🅿️',COMING_SOON:'🚧',NO_CONTENT:'📭',DEFAULT_PAGE:'📄',SUSPENDED:'🚫',SHELL_SITE:'🏗️',CROSS_DOMAIN_REDIRECT:'⚠️',POLITICAL_CAMPAIGN:'🏛️',BLOCKED:'🛡️'}[v]||'❓');
 
-function startKeepalive(){stopKeepalive();_keepaliveTimer=setInterval(async()=>{try{await fetch(API+'/api/health',{signal:AbortSignal.timeout(5000)})}catch(e){}},18000)}
+function startKeepalive(){stopKeepalive();_keepaliveTimer=setInterval(async()=>{try{await fetch(API+'/api/health',{signal:AbortSignal.timeout(5000)})}catch(e){}},12000)}
 function stopKeepalive(){if(_keepaliveTimer){clearInterval(_keepaliveTimer);_keepaliveTimer=null}}
 
 async function warmup(){
@@ -352,7 +352,7 @@ async function runBatch(opts){
       results.push(opts.onError(doms[i],e.message));
       retryQueue.push(i);
     }
-    if(i<doms.length-1)await wait(400);
+    if(i<doms.length-1)await wait(150);
   }
   if(retryQueue.length>0&&!ctrl.signal.aborted){
     showLoader('Retrying '+retryQueue.length+' failed...','Second pass');
@@ -431,7 +431,7 @@ async function doBulk(){
       results.push({domain:doms[i],overallStatus:'ERROR',isGenuinelyValid:false,error:e.message,reasons:[e.message],flags:[]});
       retryQueue.push(i);
     }
-    if(i<doms.length-1)await wait(400);
+    if(i<doms.length-1)await wait(150);
   }
   if(retryQueue.length>0&&!ctrl.signal.aborted){
     showLoader('Retrying '+retryQueue.length+' failed...','Second pass for failed domains');
