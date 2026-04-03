@@ -2246,7 +2246,7 @@ async function fetchContactPage(domain, homepageHtml) {
       }
     });
 
-    const toTry = [...new Set([...foundSlugs, ...contactSlugs])].slice(0, 6);
+    const toTry = [...new Set([...foundSlugs, ...contactSlugs])].slice(0, 3);
 
     const hdrs = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -2255,7 +2255,7 @@ async function fetchContactPage(domain, homepageHtml) {
 
     const trySlug = async (slug) => {
       const resp = await axios.get(`https://${domain}${slug}`, {
-        timeout: 4000,
+        timeout: 2500,
         maxRedirects: 3,
         validateStatus: s => s === 200,
         headers: hdrs,
@@ -2345,9 +2345,10 @@ app.post('/api/extract-business', async (req, res) => {
     //   Tier 1 (wins): Python NLP confidence ≥ 85
     //   Tier 2 (wins if Tier 1 empty): DOM H1 text
     //   Tier 3 (fallback): JS/cheerio extracted name from extractBusinessInfo
-    const [pythonExtraction, contactHtml] = await Promise.all([
+    const [pythonExtraction, contactHtml, domainAgeResult] = await Promise.all([
       extractBusinessWithPython(html, httpStatus.finalUrl || `https://${domain}`),
       fetchContactPage(domain, html),
+      getDomainAge(domain).catch(() => null),
     ]);
 
     if (pythonExtraction?.ok && pythonExtraction.best) {
@@ -2421,17 +2422,11 @@ app.post('/api/extract-business', async (req, res) => {
 
     business.strength = buildBusinessStrengthSignals(business);
 
-    // Fetch domain age in parallel-style (best-effort, capped at 8s)
+    // domainAge already fetched in parallel with fetchContactPage above
     let domainAge = null;
-    try {
-      const ageResult = await Promise.race([
-        getDomainAge(domain),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('age-timeout')), 8000))
-      ]);
-      if (ageResult?.createdDate) {
-        domainAge = { ageText: ageResult.ageText, createdDate: ageResult.createdDate, ageInDays: ageResult.ageInDays, registrar: ageResult.registrar };
-      }
-    } catch (e) { /* best-effort */ }
+    if (domainAgeResult?.createdDate) {
+      domainAge = { ageText: domainAgeResult.ageText, createdDate: domainAgeResult.createdDate, ageInDays: domainAgeResult.ageInDays, registrar: domainAgeResult.registrar };
+    }
 
     console.log(`  -> ${websiteStatus} | ${business.businessName} | Phones:${business.phones.length} Emails:${business.emails.length} Social:${business.socialSignals?.length||0} | ${business.country.name} | Age:${domainAge?.ageText||'N/A'}`);
 
