@@ -27,17 +27,13 @@ html{scroll-behavior:smooth}body{font-family:'DM Sans',system-ui,sans-serif;back
 @keyframes fadeInUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 .tab{flex:1;padding:10px 6px;background:none;border:none;border-radius:8px;color:var(--t2);font-size:.79rem;font-weight:600;cursor:pointer;transition:all .25s;font-family:'DM Sans',sans-serif;white-space:nowrap}
 .tab:hover{color:var(--t1);background:rgba(255,255,255,.04)}.tab.active{background:var(--card);color:var(--t1);box-shadow:0 1px 8px rgba(0,0,0,.3)}
-.tab[data-tab="single"].active{color:var(--acc)}
-.tab[data-tab="bulk"].active{color:var(--grn)}
-.tab[data-tab="biz"].active{color:var(--pur)}
-.tab[data-tab="social"].active{color:var(--pin)}
+.tab[data-tab="single"].active{color:var(--acc)}.tab[data-tab="bulk"].active{color:var(--grn)}.tab[data-tab="biz"].active{color:var(--pur)}.tab[data-tab="social"].active{color:var(--pin)}
 input,textarea{font-family:'JetBrains Mono',monospace}
 .search-section{display:none;gap:10px;margin-bottom:2rem;max-width:800px;margin-left:auto;margin-right:auto}
 .search-input-wrap{flex:1;position:relative}
 .search-input-wrap .icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:var(--t3);pointer-events:none}
 .sinput{width:100%;padding:14px 16px 14px 46px;background:var(--card);border:1px solid var(--bdr);border-radius:12px;color:var(--t1);font-size:1rem;outline:none;transition:border-color .2s,box-shadow .2s}
-.sinput::placeholder{color:var(--t3)}.sinput:focus{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-g)}
-.sinput.invalid{border-color:var(--red);box-shadow:0 0 0 3px rgba(239,68,68,.2)}
+.sinput::placeholder{color:var(--t3)}.sinput:focus{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-g)}.sinput.invalid{border-color:var(--red);box-shadow:0 0 0 3px rgba(239,68,68,.2)}
 .val-msg{font-size:.75rem;color:var(--red);margin-top:4px;display:none}
 .btn{padding:14px 28px;background:var(--acc);border:none;border-radius:12px;color:#fff;font-size:.95rem;font-weight:600;cursor:pointer;transition:all .2s;white-space:nowrap;font-family:'DM Sans',sans-serif;position:relative;overflow:hidden}
 .btn::after{content:'';position:absolute;inset:0;background:linear-gradient(135deg,rgba(255,255,255,.1),transparent);opacity:0;transition:opacity .2s}
@@ -121,17 +117,7 @@ input,textarea{font-family:'JetBrains Mono',monospace}
 .social-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;background:var(--bg2);border:1px solid var(--bdr);text-decoration:none;margin:2px;transition:all .2s;flex-shrink:0}
 .social-icon-btn:hover{transform:translateY(-2px);border-color:var(--bdr-g);box-shadow:0 4px 12px rgba(59,130,246,.2)}
 .social-icon-btn svg{width:15px;height:15px;display:block}
-.social-icon-btn.fb-ic:hover{background:#1877f215;border-color:#1877f260}
-.social-icon-btn.ig-ic:hover{background:#e1306c15;border-color:#e1306c60}
-.social-icon-btn.tw-ic:hover{background:#1da1f215;border-color:#1da1f260}
-.social-icon-btn.li-ic:hover{background:#0a66c215;border-color:#0a66c260}
-.social-icon-btn.yt-ic:hover{background:#ff000015;border-color:#ff000060}
-.social-icon-btn.tt-ic:hover{background:#69c9d015;border-color:#69c9d060}
-.social-icon-btn.yl-ic:hover{background:#d3232315;border-color:#d3232360}
-.social-icon-btn.gb-ic:hover{background:#4285f415;border-color:#4285f460}
-.social-icon-btn.wa-ic:hover{background:#25d36615;border-color:#25d36660}
-.social-icon-btn.pi-ic:hover{background:#e6000015;border-color:#e6000060}
-.social-icon-btn.ge-ic:hover{background:#3b82f615;border-color:#3b82f660}
+.social-icon-btn.fb-ic:hover{background:#1877f215;border-color:#1877f260}.social-icon-btn.ig-ic:hover{background:#e1306c15;border-color:#e1306c60}.social-icon-btn.tw-ic:hover{background:#1da1f215;border-color:#1da1f260}.social-icon-btn.li-ic:hover{background:#0a66c215;border-color:#0a66c260}.social-icon-btn.yt-ic:hover{background:#ff000015;border-color:#ff000060}.social-icon-btn.tt-ic:hover{background:#69c9d015;border-color:#69c9d060}.social-icon-btn.yl-ic:hover{background:#d3232315;border-color:#d3232360}.social-icon-btn.gb-ic:hover{background:#4285f415;border-color:#4285f460}.social-icon-btn.wa-ic:hover{background:#25d36615;border-color:#25d36660}.social-icon-btn.pi-ic:hover{background:#e6000015;border-color:#e6000060}.social-icon-btn.ge-ic:hover{background:#3b82f615;border-color:#3b82f660}
 .soc-count{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--pin-b);color:var(--pin);font-size:.65rem;font-weight:700;font-family:'JetBrains Mono',monospace;margin-left:4px;vertical-align:middle}
 .soc-row-rich td{background:rgba(236,72,153,.025)}
 .error-box{display:none;background:var(--red-b);border:1px solid rgba(239,68,68,.3);border-radius:12px;padding:1.25rem 1.5rem;margin-bottom:1.5rem;color:var(--red);font-weight:500}.error-box.show{display:block;animation:fadeInUp .3s ease}
@@ -143,20 +129,17 @@ input,textarea{font-family:'JetBrains Mono',monospace}
 <body>
 <div class="bg-grid"></div><div class="bg-glow"></div>
 <div class="container">
-
 <header class="header">
   <div class="header-badge"><span class="dot"></span> Intelligence Engine v4.0</div>
   <h1>Website Intelligence</h1>
   <p>Domain analysis, business extraction, and social signal detection.</p>
 </header>
-
 <div class="tabs">
-  <button class="tab active" data-tab="single"  onclick="switchTab('single')">🔍 Single Domain</button>
-  <button class="tab"        data-tab="bulk"    onclick="switchTab('bulk')">⚡ Bulk Analysis</button>
-  <button class="tab"        data-tab="biz"     onclick="switchTab('biz')">🏢 Business Info</button>
-  <button class="tab"        data-tab="social"  onclick="switchTab('social')">📡 Social Signals</button>
+  <button class="tab active" data-tab="single" onclick="switchTab('single')">🔍 Single Domain</button>
+  <button class="tab" data-tab="bulk" onclick="switchTab('bulk')">⚡ Bulk Analysis</button>
+  <button class="tab" data-tab="biz" onclick="switchTab('biz')">🏢 Business Info</button>
+  <button class="tab" data-tab="social" onclick="switchTab('social')">📡 Social Signals</button>
 </div>
-
 <div class="search-section" id="sec-single">
   <div class="search-input-wrap">
     <svg class="icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -165,7 +148,6 @@ input,textarea{font-family:'JetBrains Mono',monospace}
   </div>
   <button class="btn" onclick="doSingle()">Analyze</button>
 </div>
-
 <div class="bulk-area" id="sec-bulk">
   <textarea class="ta" id="bulk-ta" placeholder="Enter domains, one per line (max 100):&#10;example.com&#10;google.com" oninput="updateCt('bulk-ta','bulk-ct')"></textarea>
   <div class="count" id="bulk-ct">0 domains (max 100)</div>
@@ -174,7 +156,6 @@ input,textarea{font-family:'JetBrains Mono',monospace}
     <button class="btn btn-sm btn-red" id="bulk-cancel" onclick="cancelOp('bulk')" style="display:none">⏹ Cancel</button>
   </div>
 </div>
-
 <div class="bulk-area" id="sec-biz">
   <textarea class="ta" id="biz-ta" placeholder="Enter domains for business extraction (max 100):&#10;bocasmilecenter.com&#10;millerandsonsplumbing.net" oninput="updateCt('biz-ta','biz-ct')"></textarea>
   <div class="count" id="biz-ct">0 domains (max 100)</div>
@@ -183,7 +164,6 @@ input,textarea{font-family:'JetBrains Mono',monospace}
     <button class="btn btn-sm btn-red" id="biz-cancel" onclick="cancelOp('biz')" style="display:none">⏹ Cancel</button>
   </div>
 </div>
-
 <div class="bulk-area" id="sec-social">
   <textarea class="ta" id="social-ta" placeholder="Enter domains for social signal extraction (max 100):&#10;davcomasonry.com&#10;bocasmilecenter.com" oninput="updateCt('social-ta','social-ct')"></textarea>
   <div class="count" id="social-ct">0 domains (max 100)</div>
@@ -192,7 +172,6 @@ input,textarea{font-family:'JetBrains Mono',monospace}
     <button class="btn btn-sm btn-red" id="social-cancel" onclick="cancelOp('social')" style="display:none">⏹ Cancel</button>
   </div>
 </div>
-
 <div class="error-box" id="errbox"></div>
 <div class="loader" id="loader">
   <div class="spinner"></div>
@@ -201,12 +180,10 @@ input,textarea{font-family:'JetBrains Mono',monospace}
   <div class="pbar-wrap" id="pbar-wrap" style="display:none"><div class="pbar" id="pbar"></div></div>
   <div class="ptext" id="ptext" style="display:none"></div>
 </div>
-
 <div class="results-area" id="res-single"></div>
 <div class="results-area" id="res-bulk"></div>
 <div class="results-area" id="res-biz"></div>
 <div class="results-area" id="res-social"></div>
-
 </div>
 <script>
 const API=window.location.origin;
@@ -233,6 +210,9 @@ function socialIconBtn(s){
   const cls=SOCIAL_CLASSES[s.platform]||'ge-ic';
   return '<a href="'+E(s.url)+'" target="_blank" rel="noopener" class="social-icon-btn '+cls+'" title="'+E(s.platform)+'">'+ic+'</a>';
 }
+
+// Domain validation — uses character classes [.] [-] [/] instead of backslash escapes
+// because the file-write tool double-escapes backslashes, breaking \. and \- in regexes.
 function isValidDomain(d){
   d=d.trim().toLowerCase().replace(/^https?:[/][/]/,'').replace(/[/].*/,'').replace(/^www[.]/,'');
   return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?[.])+[a-z]{2,}$/i.test(d);
@@ -289,24 +269,34 @@ const fmtV=v=>({VALID:'Genuine Active Website',PARKED:'Parked / For Sale',COMING
 const vC=v=>({VALID:'green',PARKED:'orange',COMING_SOON:'yellow',NO_CONTENT:'orange',DEFAULT_PAGE:'orange',SUSPENDED:'red',SHELL_SITE:'orange',CROSS_DOMAIN_REDIRECT:'red',POLITICAL_CAMPAIGN:'blue',BLOCKED:'orange'}[v]||'orange');
 const vE=v=>({VALID:'✅',PARKED:'🅿️',COMING_SOON:'🚧',NO_CONTENT:'📭',DEFAULT_PAGE:'📄',SUSPENDED:'🚫',SHELL_SITE:'🏗️',CROSS_DOMAIN_REDIRECT:'⚠️',POLITICAL_CAMPAIGN:'🏛️',BLOCKED:'🛡️'}[v]||'❓');
 
-function startKeepalive(){stopKeepalive();_keepaliveTimer=setInterval(async()=>{try{await fetch(API+'/api/health',{signal:AbortSignal.timeout(5000)})}catch(e){}},12000)}
+// Keepalive fires every 12s to prevent Render free tier sleeping mid-batch.
+// Starts immediately when a batch begins — before warmup completes.
+function startKeepalive(){
+  stopKeepalive();
+  _keepaliveTimer=setInterval(async()=>{
+    try{await fetch(API+'/api/health',{signal:AbortSignal.timeout(5000)})}catch(e){}
+  },12000);
+}
 function stopKeepalive(){if(_keepaliveTimer){clearInterval(_keepaliveTimer);_keepaliveTimer=null}}
 
+// Warmup polls /api/health for up to 28s. Shows elapsed time (not countdown).
+// If server never responds, returns false and lets the domain request wake it.
 async function warmup(){
-  // Render free tier cold-starts in 20-35s. We poll /api/health every 3s
-  // for up to 28s. If it never responds, we bail and let the actual domain
-  // request wake the server — the 27s route timeout handles any slowness.
-  // Reduced from 45s: users were seeing "41s remaining" countdowns which
-  // looked broken even though the server was just starting normally.
   const MAX=28000,INTERVAL=3000;const t0=Date.now();
   while(Date.now()-t0<MAX){
-    try{const r=await fetch(API+'/api/health',{signal:AbortSignal.timeout(INTERVAL-200)});
-      if(r.ok){document.getElementById('loader-sub').textContent='Server ready ('+((Date.now()-t0)/1000).toFixed(1)+'s)';return true}}catch(e){}
+    try{
+      const r=await fetch(API+'/api/health',{signal:AbortSignal.timeout(INTERVAL-200)});
+      if(r.ok){
+        document.getElementById('loader-sub').textContent='Server ready ('+((Date.now()-t0)/1000).toFixed(1)+'s)';
+        return true;
+      }
+    }catch(e){}
     const elapsed=((Date.now()-t0)/1000).toFixed(0);
     document.getElementById('loader-sub').textContent='Starting server... ('+elapsed+'s)';
     await new Promise(r=>setTimeout(r,300));
   }
-  document.getElementById('loader-sub').textContent='Starting first request...';return false;
+  document.getElementById('loader-sub').textContent='Starting first request...';
+  return false;
 }
 
 async function fetchWithRetry(url,body,retries=1,signal=null){
@@ -314,62 +304,25 @@ async function fetchWithRetry(url,body,retries=1,signal=null){
     try{
       const opts={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};
       if(signal)opts.signal=signal;
-      const r=await fetch(url,opts);const text=await r.text();
+      const r=await fetch(url,opts);
+      const text=await r.text();
       if(!text||!text.trim()){
-        if(i<retries){document.getElementById('loader-sub').textContent='Re-waking server for retry '+(i+1)+'...';await warmup();continue}
-        throw new Error('Server cold-start timeout. Please click the button again — the server needs a moment to wake up.');
+        if(i<retries){await warmup();continue}
+        throw new Error('Server cold-start timeout. Please click the button again.');
       }
       let data;
-      try{data=JSON.parse(text)}catch(pe){if(i<retries){await wait(2000);continue}throw new Error('Server sent an invalid response (HTTP '+r.status+'). Please try again.')}
+      try{data=JSON.parse(text)}catch(pe){
+        if(i<retries){await wait(2000);continue}
+        throw new Error('Server sent an invalid response (HTTP '+r.status+'). Please try again.');
+      }
       if(!r.ok&&r.status>=500&&i<retries){await wait(1500);continue}
       return data;
-    }catch(e){if(e.name==='AbortError')throw e;if(i<retries){await wait(2000);continue}throw e}
-  }
-}
-
-// Shared batch runner for biz + social tabs
-async function runBatch(opts){
-  const txt=document.getElementById(opts.taId).value.trim();if(!txt)return null;
-  let doms=txt.split('\n').map(d=>d.trim()).filter(d=>d);
-  const invalid=doms.filter(d=>!isValidDomain(d));
-  if(invalid.length>0){showErr('Invalid domains: '+invalid.slice(0,5).join(', ')+(invalid.length>5?' (+'+(invalid.length-5)+' more)':''));return null}
-  if(!doms.length)return null;if(doms.length>100){showErr('Max 100 domains');return null}
-  document.getElementById('errbox').classList.remove('show');
-  const ctrl=new AbortController();cancelCtrl[opts.ctrlKey]=ctrl;
-  document.getElementById(opts.btnId).disabled=true;
-  document.getElementById(opts.cancelId).style.display='block';
-  showLoader('Warming up...','Contacting server...');
-  await warmup();startKeepalive();showProgress(0,doms.length,'');
-  const results=[];let retryQueue=[];
-  for(let i=0;i<doms.length;i++){
-    if(ctrl.signal.aborted)break;
-    showProgress(i,doms.length,doms[i]);
-    try{
-      const d=await fetchWithRetry(API+opts.endpoint,{domain:doms[i]},opts.retries||3,ctrl.signal);
-      results.push(opts.onResult(d,doms[i]));
     }catch(e){
-      if(e.name==='AbortError')break;
-      results.push(opts.onError(doms[i],e.message));
-      retryQueue.push(i);
-    }
-    if(i<doms.length-1)await wait(150);
-  }
-  if(retryQueue.length>0&&!ctrl.signal.aborted){
-    showLoader('Retrying '+retryQueue.length+' failed...','Second pass');
-    for(const idx of retryQueue){
-      if(ctrl.signal.aborted)break;
-      try{
-        await wait(1000);
-        const d=await fetchWithRetry(API+opts.endpoint,{domain:doms[idx]},2,ctrl.signal);
-        const ri=results.findIndex(r=>r.domain===doms[idx]&&r._isError);
-        if(ri>=0)results[ri]={...opts.onResult(d,doms[idx]),retried:true};
-      }catch(e){if(e.name==='AbortError')break}
+      if(e.name==='AbortError')throw e;
+      if(i<retries){await wait(2000);continue}
+      throw e;
     }
   }
-  document.getElementById(opts.btnId).disabled=false;
-  document.getElementById(opts.cancelId).style.display='none';
-  cancelCtrl[opts.ctrlKey]=null;stopKeepalive();hideLoader();
-  return results;
 }
 
 // ── SINGLE DOMAIN ─────────────────────────────────────────────
@@ -403,7 +356,8 @@ function renderSingle(d){
   h+='<div class="cs" style="margin-top:1rem">'+stat(ct.details?.wordCount||0,'Words')+stat(ct.details?.uniqueWordCount||0,'Unique')+stat(ct.details?.headings?.length||0,'Headings')+stat(ct.details?.images||0,'Images')+stat(ct.details?.links?.internal||0,'Int Links')+stat(ct.details?.forms||0,'Forms')+'</div>';
   if(ct.details?.title)h+='<div style="margin-top:1rem;padding:9px 13px;background:var(--bg2);border-radius:8px"><span style="font-size:.7rem;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.05em">Title</span><br><span class="mono" style="font-size:.82rem">'+E(ct.details.title)+'</span></div>';
   if(ct.flags?.length>0){h+='<div style="margin-top:10px">';ct.flags.forEach(f=>{const w=['CROSS_DOMAIN_REDIRECT','SUSPICIOUS_REDIRECT_TARGET','SHELL_SITE','PARKED'].includes(f);const i=['POLITICAL_CAMPAIGN','HAS_FEC_DISCLOSURE','WEB_APP_LOGIN'].includes(f);h+='<span class="fb '+(w?'warn':i?'info':'')+'">'+f.replace(/_/g,' ')+'</span>'});h+='</div>'}
-  h+='</div></div>';el.innerHTML=h;
+  h+='</div></div>';
+  el.innerHTML=h;
 }
 
 // ── BULK ANALYSIS ─────────────────────────────────────────────
@@ -412,13 +366,16 @@ async function doBulk(){
   let doms=txt.split('\n').map(d=>d.trim()).filter(d=>d);
   const invalid=doms.filter(d=>!isValidDomain(d));
   if(invalid.length>0){showErr('Invalid domains: '+invalid.slice(0,5).join(', ')+(invalid.length>5?' (+'+(invalid.length-5)+' more)':''));return}
-  if(!doms.length)return;if(doms.length>100){showErr('Max 100 domains');return}
+  if(!doms.length)return;
+  if(doms.length>100){showErr('Max 100 domains');return}
   document.getElementById('errbox').classList.remove('show');
   const ctrl=new AbortController();cancelCtrl.bulk=ctrl;
   const btn=document.getElementById('bulk-btn');btn.disabled=true;
   document.getElementById('bulk-cancel').style.display='block';
-  showLoader('Warming up...','Contacting server...');
-  await warmup();startKeepalive();showProgress(0,doms.length,'');
+  showLoader('Starting...','Waking server...');
+  startKeepalive();  // start immediately, before warmup
+  await warmup();
+  showProgress(0,doms.length,'');
   const results=[];let retryQueue=[];
   for(let i=0;i<doms.length;i++){
     if(ctrl.signal.aborted)break;
@@ -455,7 +412,8 @@ function renderBulk(res){
   h+='<div class="bact"><button class="btn btn-sm btn-csv" onclick="exportBulkCSV()">⬇ Analysis CSV</button></div>';
   h+='<div class="btw"><table class="bt"><thead><tr><th>#</th><th>Domain</th><th>Status</th><th>Valid?</th><th>Title</th><th>HTTP</th><th>Words</th><th>Confidence</th><th>Redirect Target</th><th>Flags</th><th>Remarks</th></tr></thead><tbody>';
   res.forEach((r,i)=>{
-    h+='<tr><td class="mono" style="font-size:.74rem;color:var(--t3)">'+(i+1)+'</td>';
+    h+='<tr>';
+    h+='<td class="mono" style="font-size:.74rem;color:var(--t3)">'+(i+1)+'</td>';
     h+='<td><span class="bd">'+E(r.domain)+'</span>'+(r.retried?'<span style="font-size:.6rem;color:var(--org);margin-left:4px">↻</span>':'')+'</td>';
     h+='<td><span class="bsb '+r.overallStatus+'">'+fmtS(r.overallStatus)+'</span></td>';
     h+='<td><span class="bv '+(r.isGenuinelyValid?'yes':'no')+'">'+(r.isGenuinelyValid?'✓':'✗')+'</span></td>';
@@ -465,15 +423,63 @@ function renderBulk(res){
     h+='<td class="mono" style="font-size:.78rem">'+(r.confidence?r.confidence+'%':'—')+'</td>';
     h+='<td class="mono" style="font-size:.74rem;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+E(r.redirectInfo?.target||'—')+'</td>';
     h+='<td style="font-size:.74rem;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+E(r.flags?.join(', ')||'—')+'</td>';
-    h+='<td style="color:var(--t2);font-size:.76rem;max-width:200px">'+E((r.reasons?.[0]||r.error||'—').substring(0,100))+'</td></tr>';
+    h+='<td style="color:var(--t2);font-size:.76rem;max-width:200px">'+E((r.reasons?.[0]||r.error||'—').substring(0,100))+'</td>';
+    h+='</tr>';
   });
   h+='</tbody></table></div>';
   if(res.some(r=>r.retried))h+='<div class="retry-note">↻ = auto-retried after initial failure</div>';
   el.innerHTML=h;
 }
 
+// ── SHARED BATCH RUNNER (Business Info + Social Signals) ──────
+async function runBatch(opts){
+  const txt=document.getElementById(opts.taId).value.trim();if(!txt)return null;
+  let doms=txt.split('\n').map(d=>d.trim()).filter(d=>d);
+  const invalid=doms.filter(d=>!isValidDomain(d));
+  if(invalid.length>0){showErr('Invalid domains: '+invalid.slice(0,5).join(', ')+(invalid.length>5?' (+'+(invalid.length-5)+' more)':''));return null}
+  if(!doms.length)return null;
+  if(doms.length>100){showErr('Max 100 domains');return null}
+  document.getElementById('errbox').classList.remove('show');
+  const ctrl=new AbortController();cancelCtrl[opts.ctrlKey]=ctrl;
+  document.getElementById(opts.btnId).disabled=true;
+  document.getElementById(opts.cancelId).style.display='block';
+  showLoader('Starting...','Waking server...');
+  startKeepalive();  // start immediately, before warmup
+  await warmup();
+  showProgress(0,doms.length,'');
+  const results=[];let retryQueue=[];
+  for(let i=0;i<doms.length;i++){
+    if(ctrl.signal.aborted)break;
+    showProgress(i,doms.length,doms[i]);
+    try{
+      const d=await fetchWithRetry(API+opts.endpoint,{domain:doms[i]},opts.retries||3,ctrl.signal);
+      results.push(opts.onResult(d,doms[i]));
+    }catch(e){
+      if(e.name==='AbortError')break;
+      results.push(opts.onError(doms[i],e.message));
+      retryQueue.push(i);
+    }
+    if(i<doms.length-1)await wait(150);
+  }
+  if(retryQueue.length>0&&!ctrl.signal.aborted){
+    showLoader('Retrying '+retryQueue.length+' failed...','Second pass');
+    for(const idx of retryQueue){
+      if(ctrl.signal.aborted)break;
+      try{
+        await wait(1000);
+        const d=await fetchWithRetry(API+opts.endpoint,{domain:doms[idx]},2,ctrl.signal);
+        const ri=results.findIndex(r=>r.domain===doms[idx]&&r._isError);
+        if(ri>=0)results[ri]={...opts.onResult(d,doms[idx]),retried:true};
+      }catch(e){if(e.name==='AbortError')break}
+    }
+  }
+  document.getElementById(opts.btnId).disabled=false;
+  document.getElementById(opts.cancelId).style.display='none';
+  cancelCtrl[opts.ctrlKey]=null;stopKeepalive();hideLoader();
+  return results;
+}
+
 // ── BUSINESS INFO ─────────────────────────────────────────────
-// Columns: # | Domain | Status | Country | Business Name | Street | City | State | ZIP | Phone | Email | Domain Age
 async function doBiz(){
   const results=await runBatch({
     endpoint:'/api/extract-business',taId:'biz-ta',ctrlKey:'biz',btnId:'biz-btn',cancelId:'biz-cancel',retries:3,
@@ -487,9 +493,7 @@ function renderBiz(res){
   const ok=res.filter(r=>r.businessName&&!r.error).length;
   let h='<div class="bsum">'+sumBox(res.length,'Total','--t1')+sumBox(ok,'Extracted','--grn')+sumBox(res.length-ok,'Failed/Empty','--red')+'</div>';
   h+='<div class="bact"><button class="btn btn-sm btn-csv" onclick="exportBizCSV()">⬇ Business CSV</button></div>';
-  h+='<div class="btw"><table class="bt"><thead><tr>';
-  h+='<th>#</th><th>Domain</th><th>Status</th><th>Country</th><th>Business Name</th><th>Street</th><th>City</th><th>State</th><th>ZIP</th><th>Phone</th><th>Email</th><th>Domain Age</th>';
-  h+='</tr></thead><tbody>';
+  h+='<div class="btw"><table class="bt"><thead><tr><th>#</th><th>Domain</th><th>Status</th><th>Country</th><th>Business Name</th><th>Street</th><th>City</th><th>State</th><th>ZIP</th><th>Phone</th><th>Email</th><th>Domain Age</th></tr></thead><tbody>';
   res.forEach((r,i)=>{
     const a=r.address||{};const age=r.domainAge||null;
     h+='<tr>';
@@ -515,7 +519,6 @@ function renderBiz(res){
 }
 
 // ── SOCIAL SIGNALS ────────────────────────────────────────────
-// Columns: # | Domain | Status | Social Signals (clickable icons + count badge)
 async function doSocial(){
   const results=await runBatch({
     endpoint:'/api/extract-business',taId:'social-ta',ctrlKey:'social',btnId:'social-btn',cancelId:'social-cancel',retries:3,
@@ -539,7 +542,7 @@ function renderSocial(res){
     h+='<td><span class="bsb '+(r.websiteStatus||'')+'">'+fmtS(r.websiteStatus||'UNKNOWN')+'</span></td>';
     h+='<td style="padding:8px 14px;white-space:nowrap">';
     if(hasSoc){h+=soc.map(s=>socialIconBtn(s)).join('');h+='<span class="soc-count">'+soc.length+'</span>'}
-    else{h+='<span style="color:var(--t3);font-size:.76rem">No signals found</span>'}
+    else h+='<span style="color:var(--t3);font-size:.76rem">No signals found</span>';
     h+='</td></tr>';
   });
   h+='</tbody></table></div>';
