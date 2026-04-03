@@ -7,7 +7,7 @@
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#0a0e17;--bg2:#111827;--card:#151d2e;--card-h:#1a2540;--bdr:#1e2a42;--bdr-g:#2563eb44;--t1:#e8edf5;--t2:#8896b0;--t3:#4a5875;--acc:#3b82f6;--acc-g:#3b82f640;--grn:#22c55e;--grn-b:#22c55e15;--red:#ef4444;--red-b:#ef444415;--org:#f59e0b;--org-b:#f59e0b15;--yel:#eab308;--yel-b:#eab30815;--pur:#a855f7;--pur-b:#a855f715;--cyn:#06b6d4;--cyn-b:#06b6d415;--blu:#3b82f6;--blu-b:#3b82f615;--pin:#ec4899;--pin-b:#ec489915}
+:root{--bg:#0a0e17;--bg2:#111827;--card:#151d2e;--card-h:#1a2540;--bdr:#1e2a42;--bdr-g:#2563eb44;--t1:#e8edf5;--t2:#8896b0;--t3:#4a5875;--acc:#3b82f6;--acc-g:#3b82f640;--grn:#22c55e;--grn-b:#22c55e15;--red:#ef4444;--red-b:#ef444415;--org:#f59e0b;--org-b:#f59e0b15;--yel:#eab308;--yel-b:#eab30815;--pur:#a855f7;--pur-b:#a855f715;--cyn:#06b6d4;--cyn-b:#06b6d415;--blu:#3b82f6;--blu-b:#3b82f615}
 html{scroll-behavior:smooth}body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(--t1);min-height:100vh;line-height:1.6}
 .bg-grid{position:fixed;inset:0;background-image:linear-gradient(rgba(59,130,246,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,.04) 1px,transparent 1px);background-size:60px 60px;pointer-events:none;z-index:0;animation:gridShift 30s linear infinite}
 @keyframes gridShift{0%{background-position:0 0}100%{background-position:60px 60px}}
@@ -23,11 +23,11 @@ html{scroll-behavior:smooth}body{font-family:'DM Sans',system-ui,sans-serif;back
 .header h1{font-family:'JetBrains Mono',monospace;font-size:2.4rem;font-weight:700;letter-spacing:-.03em;margin-bottom:.4rem;background:linear-gradient(135deg,#e8edf5 30%,#3b82f6 70%,#8896b0);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-size:200% auto;animation:shimmerText 4s linear infinite}
 @keyframes shimmerText{0%{background-position:0% center}100%{background-position:200% center}}
 .header p{color:var(--t2);font-size:.95rem;max-width:600px;margin:0 auto}
-.tabs{display:flex;gap:4px;margin-bottom:2rem;max-width:980px;margin-left:auto;margin-right:auto;background:var(--bg2);border-radius:10px;padding:4px;animation:fadeInUp .5s ease .3s both}
+.tabs{display:flex;gap:4px;margin-bottom:2rem;max-width:860px;margin-left:auto;margin-right:auto;background:var(--bg2);border-radius:10px;padding:4px;animation:fadeInUp .5s ease .3s both}
 @keyframes fadeInUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
-.tab{flex:1;padding:10px 6px;background:none;border:none;border-radius:8px;color:var(--t2);font-size:.79rem;font-weight:600;cursor:pointer;transition:all .25s;font-family:'DM Sans',sans-serif;white-space:nowrap}
+.tab{flex:1;padding:10px;background:none;border:none;border-radius:8px;color:var(--t2);font-size:.84rem;font-weight:600;cursor:pointer;transition:all .25s;font-family:'DM Sans',sans-serif;white-space:nowrap}
 .tab:hover{color:var(--t1);background:rgba(255,255,255,.04)}.tab.active{background:var(--card);color:var(--t1);box-shadow:0 1px 8px rgba(0,0,0,.3)}
-.tab[data-tab="single"].active{color:var(--acc)}.tab[data-tab="bulk"].active{color:var(--grn)}.tab[data-tab="biz"].active{color:var(--pur)}.tab[data-tab="social"].active{color:var(--pin)}
+.tab[data-tab="single"].active{color:var(--acc)}.tab[data-tab="bulk"].active{color:var(--grn)}.tab[data-tab="biz"].active{color:var(--pur)}
 input,textarea{font-family:'JetBrains Mono',monospace}
 .search-section{display:none;gap:10px;margin-bottom:2rem;max-width:800px;margin-left:auto;margin-right:auto}
 .search-input-wrap{flex:1;position:relative}
@@ -41,7 +41,6 @@ input,textarea{font-family:'JetBrains Mono',monospace}
 .btn-sm{padding:9px 18px;font-size:.82rem;border-radius:10px}
 .btn-csv{background:var(--grn)}.btn-csv:hover{background:#16a34a;box-shadow:0 6px 20px rgba(34,197,94,.3)}
 .btn-pur{background:var(--pur)}.btn-pur:hover{background:#9333ea;box-shadow:0 6px 20px rgba(168,85,247,.3)}
-.btn-pin{background:var(--pin)}.btn-pin:hover{background:#db2777;box-shadow:0 6px 20px rgba(236,72,153,.3)}
 .btn-red{background:var(--red)}.btn-red:hover{background:#dc2626}
 .bulk-area{display:none;max-width:800px;margin:0 auto 2rem}
 .ta{width:100%;height:160px;padding:14px 16px;background:var(--card);border:1px solid var(--bdr);border-radius:12px;color:var(--t1);font-size:.88rem;outline:none;resize:vertical;transition:border-color .2s,box-shadow .2s;margin-bottom:6px}
@@ -114,16 +113,14 @@ input,textarea{font-family:'JetBrains Mono',monospace}
 .bsb.ACTIVE{background:var(--grn-b);color:var(--grn)}.bsb.DEAD,.bsb.DOWN,.bsb.SUSPENDED{background:var(--red-b);color:var(--red)}.bsb.PARKED,.bsb.NO_CONTENT,.bsb.DEFAULT_PAGE,.bsb.SHELL_SITE{background:var(--org-b);color:var(--org)}.bsb.COMING_SOON,.bsb.ISSUES{background:var(--yel-b);color:var(--yel)}.bsb.CROSS_DOMAIN_REDIRECT{background:var(--red-b);color:var(--red)}.bsb.POLITICAL_CAMPAIGN{background:var(--blu-b);color:var(--blu)}.bsb.BLOCKED{background:var(--org-b);color:var(--org)}.bsb.ERROR{background:var(--red-b);color:var(--red)}.bsb.TIMEOUT{background:var(--org-b);color:var(--org)}
 .bv{font-weight:700;font-size:.82rem}.bv.yes{color:var(--grn)}.bv.no{color:var(--red)}
 .age-pill{display:inline-block;padding:2px 8px;border-radius:6px;font-size:.7rem;font-weight:700;font-family:'JetBrains Mono',monospace;background:var(--cyn-b);color:var(--cyn);white-space:nowrap}
-.social-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;background:var(--bg2);border:1px solid var(--bdr);text-decoration:none;margin:2px;transition:all .2s;flex-shrink:0}
+.social-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:7px;background:var(--bg2);border:1px solid var(--bdr);text-decoration:none;margin:1px;transition:all .2s;flex-shrink:0}
 .social-icon-btn:hover{transform:translateY(-2px);border-color:var(--bdr-g);box-shadow:0 4px 12px rgba(59,130,246,.2)}
-.social-icon-btn svg{width:15px;height:15px;display:block}
+.social-icon-btn svg{width:14px;height:14px;display:block}
 .social-icon-btn.fb-ic:hover{background:#1877f215;border-color:#1877f260}.social-icon-btn.ig-ic:hover{background:#e1306c15;border-color:#e1306c60}.social-icon-btn.tw-ic:hover{background:#1da1f215;border-color:#1da1f260}.social-icon-btn.li-ic:hover{background:#0a66c215;border-color:#0a66c260}.social-icon-btn.yt-ic:hover{background:#ff000015;border-color:#ff000060}.social-icon-btn.tt-ic:hover{background:#69c9d015;border-color:#69c9d060}.social-icon-btn.yl-ic:hover{background:#d3232315;border-color:#d3232360}.social-icon-btn.gb-ic:hover{background:#4285f415;border-color:#4285f460}.social-icon-btn.wa-ic:hover{background:#25d36615;border-color:#25d36660}.social-icon-btn.pi-ic:hover{background:#e6000015;border-color:#e6000060}.social-icon-btn.ge-ic:hover{background:#3b82f615;border-color:#3b82f660}
-.soc-count{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--pin-b);color:var(--pin);font-size:.65rem;font-weight:700;font-family:'JetBrains Mono',monospace;margin-left:4px;vertical-align:middle}
-.soc-row-rich td{background:rgba(236,72,153,.025)}
 .error-box{display:none;background:var(--red-b);border:1px solid rgba(239,68,68,.3);border-radius:12px;padding:1.25rem 1.5rem;margin-bottom:1.5rem;color:var(--red);font-weight:500}.error-box.show{display:block;animation:fadeInUp .3s ease}
 .mono{font-family:'JetBrains Mono',monospace}
 .retry-note{font-size:.72rem;color:var(--org);font-style:italic;margin-top:4px}
-@media(max-width:768px){.header h1{font-size:1.6rem}.search-section{flex-direction:column}.status-hero{flex-direction:column;text-align:center;padding:1.5rem}.sm{text-align:center}.cards{grid-template-columns:1fr}.cs{grid-template-columns:repeat(2,1fr)}.bt{font-size:.76rem}.bt th,.bt td{padding:8px 9px}.btn-row{flex-direction:column}.container{padding:1.5rem 1rem 3rem}.tab{font-size:.7rem;padding:8px 4px}}
+@media(max-width:768px){.header h1{font-size:1.6rem}.search-section{flex-direction:column}.status-hero{flex-direction:column;text-align:center;padding:1.5rem}.sm{text-align:center}.cards{grid-template-columns:1fr}.cs{grid-template-columns:repeat(2,1fr)}.bt{font-size:.76rem}.bt th,.bt td{padding:8px 9px}.btn-row{flex-direction:column}.container{padding:1.5rem 1rem 3rem}.tab{font-size:.78rem;padding:8px 6px}}
 </style>
 </head>
 <body>
@@ -138,7 +135,6 @@ input,textarea{font-family:'JetBrains Mono',monospace}
   <button class="tab active" data-tab="single" onclick="switchTab('single')">🔍 Single Domain</button>
   <button class="tab" data-tab="bulk" onclick="switchTab('bulk')">⚡ Bulk Analysis</button>
   <button class="tab" data-tab="biz" onclick="switchTab('biz')">🏢 Business Info</button>
-  <button class="tab" data-tab="social" onclick="switchTab('social')">📡 Social Signals</button>
 </div>
 <div class="search-section" id="sec-single">
   <div class="search-input-wrap">
@@ -164,14 +160,6 @@ input,textarea{font-family:'JetBrains Mono',monospace}
     <button class="btn btn-sm btn-red" id="biz-cancel" onclick="cancelOp('biz')" style="display:none">⏹ Cancel</button>
   </div>
 </div>
-<div class="bulk-area" id="sec-social">
-  <textarea class="ta" id="social-ta" placeholder="Enter domains for social signal extraction (max 100):&#10;davcomasonry.com&#10;bocasmilecenter.com" oninput="updateCt('social-ta','social-ct')"></textarea>
-  <div class="count" id="social-ct">0 domains (max 100)</div>
-  <div class="btn-row">
-    <button class="btn btn-pin" id="social-btn" onclick="doSocial()" style="flex:1">Extract Social Signals</button>
-    <button class="btn btn-sm btn-red" id="social-cancel" onclick="cancelOp('social')" style="display:none">⏹ Cancel</button>
-  </div>
-</div>
 <div class="error-box" id="errbox"></div>
 <div class="loader" id="loader">
   <div class="spinner"></div>
@@ -183,12 +171,11 @@ input,textarea{font-family:'JetBrains Mono',monospace}
 <div class="results-area" id="res-single"></div>
 <div class="results-area" id="res-bulk"></div>
 <div class="results-area" id="res-biz"></div>
-<div class="results-area" id="res-social"></div>
 </div>
 <script>
 const API=window.location.origin;
-let bulkData=null,bizData=null,socialData=null;
-let cancelCtrl={bulk:null,biz:null,social:null};
+let bulkData=null,bizData=null;
+let cancelCtrl={bulk:null,biz:null};
 let _keepaliveTimer=null;
 
 const SOCIAL_ICONS={
@@ -211,8 +198,7 @@ function socialIconBtn(s){
   return '<a href="'+E(s.url)+'" target="_blank" rel="noopener" class="social-icon-btn '+cls+'" title="'+E(s.platform)+'">'+ic+'</a>';
 }
 
-// Domain validation — uses character classes [.] [-] [/] instead of backslash escapes
-// because the file-write tool double-escapes backslashes, breaking \. and \- in regexes.
+// No backslash escapes — uses [.] [/] [-] to avoid create_file double-escape bug
 function isValidDomain(d){
   d=d.trim().toLowerCase().replace(/^https?:[/][/]/,'').replace(/[/].*/,'').replace(/^www[.]/,'');
   return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?[.])+[a-z]{2,}$/i.test(d);
@@ -230,8 +216,7 @@ function switchTab(t){
   document.getElementById('sec-single').style.display=t==='single'?'flex':'none';
   document.getElementById('sec-bulk').style.display=t==='bulk'?'block':'none';
   document.getElementById('sec-biz').style.display=t==='biz'?'block':'none';
-  document.getElementById('sec-social').style.display=t==='social'?'block':'none';
-  ['single','bulk','biz','social'].forEach(id=>{
+  ['single','bulk','biz'].forEach(id=>{
     const el=document.getElementById('res-'+id);
     el.style.display=(id===t&&el.innerHTML)?'block':'none';
   });
@@ -269,8 +254,6 @@ const fmtV=v=>({VALID:'Genuine Active Website',PARKED:'Parked / For Sale',COMING
 const vC=v=>({VALID:'green',PARKED:'orange',COMING_SOON:'yellow',NO_CONTENT:'orange',DEFAULT_PAGE:'orange',SUSPENDED:'red',SHELL_SITE:'orange',CROSS_DOMAIN_REDIRECT:'red',POLITICAL_CAMPAIGN:'blue',BLOCKED:'orange'}[v]||'orange');
 const vE=v=>({VALID:'✅',PARKED:'🅿️',COMING_SOON:'🚧',NO_CONTENT:'📭',DEFAULT_PAGE:'📄',SUSPENDED:'🚫',SHELL_SITE:'🏗️',CROSS_DOMAIN_REDIRECT:'⚠️',POLITICAL_CAMPAIGN:'🏛️',BLOCKED:'🛡️'}[v]||'❓');
 
-// Keepalive fires every 12s to prevent Render free tier sleeping mid-batch.
-// Starts immediately when a batch begins — before warmup completes.
 function startKeepalive(){
   stopKeepalive();
   _keepaliveTimer=setInterval(async()=>{
@@ -279,20 +262,14 @@ function startKeepalive(){
 }
 function stopKeepalive(){if(_keepaliveTimer){clearInterval(_keepaliveTimer);_keepaliveTimer=null}}
 
-// Warmup polls /api/health for up to 28s. Shows elapsed time (not countdown).
-// If server never responds, returns false and lets the domain request wake it.
 async function warmup(){
   const MAX=28000,INTERVAL=3000;const t0=Date.now();
   while(Date.now()-t0<MAX){
     try{
       const r=await fetch(API+'/api/health',{signal:AbortSignal.timeout(INTERVAL-200)});
-      if(r.ok){
-        document.getElementById('loader-sub').textContent='Server ready ('+((Date.now()-t0)/1000).toFixed(1)+'s)';
-        return true;
-      }
+      if(r.ok){document.getElementById('loader-sub').textContent='Server ready ('+((Date.now()-t0)/1000).toFixed(1)+'s)';return true}
     }catch(e){}
-    const elapsed=((Date.now()-t0)/1000).toFixed(0);
-    document.getElementById('loader-sub').textContent='Starting server... ('+elapsed+'s)';
+    document.getElementById('loader-sub').textContent='Starting server... ('+((Date.now()-t0)/1000).toFixed(0)+'s)';
     await new Promise(r=>setTimeout(r,300));
   }
   document.getElementById('loader-sub').textContent='Starting first request...';
@@ -373,7 +350,7 @@ async function doBulk(){
   const btn=document.getElementById('bulk-btn');btn.disabled=true;
   document.getElementById('bulk-cancel').style.display='block';
   showLoader('Starting...','Waking server...');
-  startKeepalive();  // start immediately, before warmup
+  startKeepalive();
   await warmup();
   showProgress(0,doms.length,'');
   const results=[];let retryQueue=[];
@@ -431,20 +408,20 @@ function renderBulk(res){
   el.innerHTML=h;
 }
 
-// ── SHARED BATCH RUNNER (Business Info + Social Signals) ──────
-async function runBatch(opts){
-  const txt=document.getElementById(opts.taId).value.trim();if(!txt)return null;
+// ── BUSINESS INFO (includes social signals as last column) ─────
+async function doBiz(){
+  const txt=document.getElementById('biz-ta').value.trim();if(!txt)return;
   let doms=txt.split('\n').map(d=>d.trim()).filter(d=>d);
   const invalid=doms.filter(d=>!isValidDomain(d));
-  if(invalid.length>0){showErr('Invalid domains: '+invalid.slice(0,5).join(', ')+(invalid.length>5?' (+'+(invalid.length-5)+' more)':''));return null}
-  if(!doms.length)return null;
-  if(doms.length>100){showErr('Max 100 domains');return null}
+  if(invalid.length>0){showErr('Invalid domains: '+invalid.slice(0,5).join(', ')+(invalid.length>5?' (+'+(invalid.length-5)+' more)':''));return}
+  if(!doms.length)return;
+  if(doms.length>100){showErr('Max 100 domains');return}
   document.getElementById('errbox').classList.remove('show');
-  const ctrl=new AbortController();cancelCtrl[opts.ctrlKey]=ctrl;
-  document.getElementById(opts.btnId).disabled=true;
-  document.getElementById(opts.cancelId).style.display='block';
+  const ctrl=new AbortController();cancelCtrl.biz=ctrl;
+  const btn=document.getElementById('biz-btn');btn.disabled=true;
+  document.getElementById('biz-cancel').style.display='block';
   showLoader('Starting...','Waking server...');
-  startKeepalive();  // start immediately, before warmup
+  startKeepalive();
   await warmup();
   showProgress(0,doms.length,'');
   const results=[];let retryQueue=[];
@@ -452,11 +429,11 @@ async function runBatch(opts){
     if(ctrl.signal.aborted)break;
     showProgress(i,doms.length,doms[i]);
     try{
-      const d=await fetchWithRetry(API+opts.endpoint,{domain:doms[i]},opts.retries||3,ctrl.signal);
-      results.push(opts.onResult(d,doms[i]));
+      const d=await fetchWithRetry(API+'/api/extract-business',{domain:doms[i]},3,ctrl.signal);
+      results.push({domain:d.domain||doms[i],websiteStatus:d.websiteStatus||'UNKNOWN',reasons:d.reasons||[],...(d.business||{}),domainAge:d.domainAge||null,error:d.error||null});
     }catch(e){
       if(e.name==='AbortError')break;
-      results.push(opts.onError(doms[i],e.message));
+      results.push({domain:doms[i],websiteStatus:'ERROR',error:e.message,reasons:[e.message]});
       retryQueue.push(i);
     }
     if(i<doms.length-1)await wait(150);
@@ -467,82 +444,43 @@ async function runBatch(opts){
       if(ctrl.signal.aborted)break;
       try{
         await wait(1000);
-        const d=await fetchWithRetry(API+opts.endpoint,{domain:doms[idx]},2,ctrl.signal);
-        const ri=results.findIndex(r=>r.domain===doms[idx]&&r._isError);
-        if(ri>=0)results[ri]={...opts.onResult(d,doms[idx]),retried:true};
+        const d=await fetchWithRetry(API+'/api/extract-business',{domain:doms[idx]},2,ctrl.signal);
+        const ri=results.findIndex(r=>r.domain===doms[idx]&&r.websiteStatus==='ERROR');
+        if(ri>=0)results[ri]={domain:d.domain||doms[idx],websiteStatus:d.websiteStatus||'UNKNOWN',reasons:d.reasons||[],...(d.business||{}),domainAge:d.domainAge||null,retried:true};
       }catch(e){if(e.name==='AbortError')break}
     }
   }
-  document.getElementById(opts.btnId).disabled=false;
-  document.getElementById(opts.cancelId).style.display='none';
-  cancelCtrl[opts.ctrlKey]=null;stopKeepalive();hideLoader();
-  return results;
-}
-
-// ── BUSINESS INFO ─────────────────────────────────────────────
-async function doBiz(){
-  const results=await runBatch({
-    endpoint:'/api/extract-business',taId:'biz-ta',ctrlKey:'biz',btnId:'biz-btn',cancelId:'biz-cancel',retries:3,
-    onResult:(d,dom)=>({domain:d.domain||dom,websiteStatus:d.websiteStatus||'UNKNOWN',reasons:d.reasons||[],...(d.business||{}),domainAge:d.domainAge||null,error:d.error||null}),
-    onError:(dom,msg)=>({domain:dom,websiteStatus:'ERROR',error:msg,reasons:[msg],_isError:true})
-  });
-  if(results){bizData=results;renderBiz(results)}
+  btn.disabled=false;document.getElementById('biz-cancel').style.display='none';cancelCtrl.biz=null;
+  stopKeepalive();hideLoader();bizData=results;renderBiz(results);
 }
 function renderBiz(res){
   const el=document.getElementById('res-biz');el.style.display='block';
   const ok=res.filter(r=>r.businessName&&!r.error).length;
   let h='<div class="bsum">'+sumBox(res.length,'Total','--t1')+sumBox(ok,'Extracted','--grn')+sumBox(res.length-ok,'Failed/Empty','--red')+'</div>';
-  h+='<div class="bact"><button class="btn btn-sm btn-csv" onclick="exportBizCSV()">⬇ Business CSV</button></div>';
-  h+='<div class="btw"><table class="bt"><thead><tr><th>#</th><th>Domain</th><th>Status</th><th>Country</th><th>Business Name</th><th>Street</th><th>City</th><th>State</th><th>ZIP</th><th>Phone</th><th>Email</th><th>Domain Age</th></tr></thead><tbody>';
+  h+='<div class="bact"><button class="btn btn-sm btn-csv" onclick="exportBizCSV()">⬇ Business CSV</button><button class="btn btn-sm btn-pur" onclick="exportCombinedCSV()">⬇ Combined CSV</button></div>';
+  h+='<div class="btw"><table class="bt"><thead><tr>';
+  h+='<th>#</th><th>Domain</th><th>Status</th><th>Country</th><th>Business Name</th><th>Street</th><th>City</th><th>State</th><th>ZIP</th><th>Phone</th><th>Email</th><th>Social</th><th>Domain Age</th>';
+  h+='</tr></thead><tbody>';
   res.forEach((r,i)=>{
-    const a=r.address||{};const age=r.domainAge||null;
+    const a=r.address||{};
+    const soc=r.socialSignals||[];
+    const age=r.domainAge||null;
     h+='<tr>';
     h+='<td class="mono" style="font-size:.72rem;color:var(--t3)">'+(i+1)+'</td>';
     h+='<td><span class="bd">'+E(r.domain)+'</span>'+(r.retried?'<span style="font-size:.6rem;color:var(--org);margin-left:4px">↻</span>':'')+'</td>';
     h+='<td><span class="bsb '+(r.websiteStatus||'')+'">'+fmtS(r.websiteStatus||'UNKNOWN')+'</span></td>';
     h+='<td class="mono" style="font-size:.76rem;white-space:nowrap">'+(r.country?.code||'—')+'</td>';
-    h+='<td style="font-size:.8rem;font-weight:600;min-width:160px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+E(r.businessName||r.error||'—')+'</td>';
-    h+='<td style="font-size:.76rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+E(a.street||'—')+'</td>';
+    h+='<td style="font-size:.8rem;font-weight:600;min-width:160px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+E(r.businessName||r.error||'—')+'</td>';
+    h+='<td style="font-size:.76rem;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+E(a.street||'—')+'</td>';
     h+='<td style="font-size:.78rem;white-space:nowrap;min-width:70px">'+E(a.city||'—')+'</td>';
-    h+='<td class="mono" style="font-size:.78rem;white-space:nowrap;min-width:55px">'+E(a.state||'—')+'</td>';
-    h+='<td class="mono" style="font-size:.78rem;white-space:nowrap;min-width:55px">'+E(a.zip||'—')+'</td>';
+    h+='<td class="mono" style="font-size:.78rem;white-space:nowrap;min-width:50px">'+E(a.state||'—')+'</td>';
+    h+='<td class="mono" style="font-size:.78rem;white-space:nowrap;min-width:50px">'+E(a.zip||'—')+'</td>';
     h+='<td class="mono" style="font-size:.76rem;white-space:nowrap">'+E(r.phones?.[0]||'—')+'</td>';
-    h+='<td class="mono" style="font-size:.72rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+E(r.emails?.[0]||'—')+'</td>';
+    h+='<td class="mono" style="font-size:.72rem;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+E(r.emails?.[0]||'—')+'</td>';
+    h+='<td style="white-space:nowrap">'+(soc.length>0?soc.map(s=>socialIconBtn(s)).join(''):'<span style="color:var(--t3)">—</span>')+'</td>';
     h+='<td style="white-space:nowrap">';
     if(age?.ageText)h+='<span class="age-pill" title="Created: '+(age.createdDate||'?')+'&#10;Registrar: '+(age.registrar||'?')+'">'+E(age.ageText)+'</span>';
     else h+='<span style="color:var(--t3)">—</span>';
-    h+='</td></tr>';
-  });
-  h+='</tbody></table></div>';
-  if(res.some(r=>r.retried))h+='<div class="retry-note">↻ = auto-retried after initial failure</div>';
-  el.innerHTML=h;
-}
-
-// ── SOCIAL SIGNALS ────────────────────────────────────────────
-async function doSocial(){
-  const results=await runBatch({
-    endpoint:'/api/extract-business',taId:'social-ta',ctrlKey:'social',btnId:'social-btn',cancelId:'social-cancel',retries:3,
-    onResult:(d,dom)=>({domain:d.domain||dom,websiteStatus:d.websiteStatus||'UNKNOWN',socialSignals:(d.business?.socialSignals)||[],error:d.error||null}),
-    onError:(dom,msg)=>({domain:dom,websiteStatus:'ERROR',socialSignals:[],error:msg,_isError:true})
-  });
-  if(results){socialData=results;renderSocial(results)}
-}
-function renderSocial(res){
-  const el=document.getElementById('res-social');el.style.display='block';
-  const withSoc=res.filter(r=>r.socialSignals?.length>0).length;
-  const totalSig=res.reduce((s,r)=>s+(r.socialSignals?.length||0),0);
-  let h='<div class="bsum">'+sumBox(res.length,'Total','--t1')+sumBox(withSoc,'Has Social','--pin')+sumBox(totalSig,'Total Signals','--cyn')+sumBox(res.length-withSoc,'No Social','--t3')+'</div>';
-  h+='<div class="bact"><button class="btn btn-sm btn-pin" onclick="exportSocialCSV()">⬇ Social CSV</button></div>';
-  h+='<div class="btw"><table class="bt"><thead><tr><th>#</th><th>Domain</th><th>Status</th><th>Social Signals</th></tr></thead><tbody>';
-  res.forEach((r,i)=>{
-    const soc=r.socialSignals||[];const hasSoc=soc.length>0;
-    h+='<tr'+(hasSoc?' class="soc-row-rich"':'')+'>';
-    h+='<td class="mono" style="font-size:.72rem;color:var(--t3)">'+(i+1)+'</td>';
-    h+='<td><span class="bd">'+E(r.domain)+'</span>'+(r.retried?'<span style="font-size:.6rem;color:var(--org);margin-left:4px">↻</span>':'')+'</td>';
-    h+='<td><span class="bsb '+(r.websiteStatus||'')+'">'+fmtS(r.websiteStatus||'UNKNOWN')+'</span></td>';
-    h+='<td style="padding:8px 14px;white-space:nowrap">';
-    if(hasSoc){h+=soc.map(s=>socialIconBtn(s)).join('');h+='<span class="soc-count">'+soc.length+'</span>'}
-    else h+='<span style="color:var(--t3);font-size:.76rem">No signals found</span>';
     h+='</td></tr>';
   });
   h+='</tbody></table></div>';
@@ -563,26 +501,31 @@ function exportBulkCSV(){
 }
 function exportBizCSV(){
   if(!bizData?.length){showErr('No business results');return}
-  let csv=cr(['Domain','Website Status','Country Code','Business Name','Street Address','City','State','Zip','Phone Number','Business Email','Domain Age','Domain Created','Registrar']);
+  const platforms=['Facebook','Instagram','Twitter/X','LinkedIn','YouTube','TikTok','Yelp','Google Business','WhatsApp','Pinterest'];
+  let csv=cr(['Domain','Website Status','Country Code','Business Name','Street Address','City','State','Zip','Phone Number','Business Email','Domain Age','Domain Created','Registrar',...platforms,'All Social Links']);
   bizData.forEach(r=>{
-    const a=r.address||{};const age=r.domainAge||{};
-    csv+=cr([r.domain,fmtS(r.websiteStatus||''),r.country?.code||'',r.businessName||'',a.street||'',a.city||'',a.state||'',a.zip||'',r.phones?.[0]||'',r.emails?.[0]||'',age.ageText||'',age.createdDate||'',age.registrar||'']);
+    const a=r.address||{};const age=r.domainAge||{};const soc=r.socialSignals||[];
+    const getSoc=name=>{const s=soc.find(x=>x.platform===name);return s?s.url:''};
+    csv+=cr([r.domain,fmtS(r.websiteStatus||''),r.country?.code||'',r.businessName||'',a.street||'',a.city||'',a.state||'',a.zip||'',r.phones?.[0]||'',r.emails?.[0]||'',age.ageText||'',age.createdDate||'',age.registrar||'',...platforms.map(p=>getSoc(p)),soc.map(s=>s.platform+': '+s.url).join(' | ')]);
   });
   dl('business-info-'+today+'.csv',csv);
 }
-function exportSocialCSV(){
-  if(!socialData?.length){showErr('No social results');return}
+function exportCombinedCSV(){
+  if(!bizData?.length&&!bulkData?.length){showErr('No data to export');return}
+  const map={};
+  if(bulkData)bulkData.forEach(r=>map[r.domain]={...map[r.domain],...r});
+  if(bizData)bizData.forEach(r=>map[r.domain]={...map[r.domain],...r});
+  const all=Object.values(map);
   const platforms=['Facebook','Instagram','Twitter/X','LinkedIn','YouTube','TikTok','Yelp','Google Business','WhatsApp','Pinterest'];
-  let csv=cr(['Domain','Status','Total Signals',...platforms,'All Social Links']);
-  socialData.forEach(r=>{
-    const soc=r.socialSignals||[];
+  let csv=cr(['Domain','Website Status','Country Code','Business Name','Street Address','City','State','Zip','Phone Number','Business Email','Domain Age','Domain Created','Registrar',...platforms,'All Social Links','Valid','HTTP Code','Word Count','Confidence','Redirect Target','Flags']);
+  all.forEach(r=>{
+    const a=r.address||{};const age=r.domainAge||{};const soc=r.socialSignals||[];
     const getSoc=name=>{const s=soc.find(x=>x.platform===name);return s?s.url:''};
-    csv+=cr([r.domain,fmtS(r.websiteStatus||''),soc.length,...platforms.map(p=>getSoc(p)),soc.map(s=>s.platform+': '+s.url).join(' | ')]);
+    csv+=cr([r.domain,fmtS(r.websiteStatus||r.overallStatus||''),r.country?.code||'',r.businessName||'',a.street||'',a.city||'',a.state||'',a.zip||'',r.phones?.[0]||'',r.emails?.[0]||'',age.ageText||'',age.createdDate||'',age.registrar||'',...platforms.map(p=>getSoc(p)),soc.map(s=>s.platform+': '+s.url).join(' | '),r.isGenuinelyValid!=null?(r.isGenuinelyValid?'TRUE':'FALSE'):'',r.statusCode||'',r.wordCount??'',r.confidence?r.confidence+'%':'',(r.redirectInfo?.target||''),(r.flags||[]).join('; ')]);
   });
-  dl('social-signals-'+today+'.csv',csv);
+  dl('combined-'+today+'.csv',csv);
 }
 
-// Init
 switchTab('single');
 </script>
 </body>
